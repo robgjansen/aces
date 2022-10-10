@@ -24,7 +24,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 /// Holds the supported subcommands and their args.
 pub enum Commands {
-    /// Generate an RSA (Public,Private) keypair
+    /// Generate a crypto keypair
     GenKey(GenKeyArgs),
     /// Collate data streams into compressed and encrypted files
     Construct(ConstructArgs),
@@ -33,24 +33,26 @@ pub enum Commands {
 }
 
 #[derive(Args)]
-pub struct GenKeyArgs {
-    /// Size of the key in bits
-    #[arg(short, long, default_value_t = 4096)]
-    pub bits: u16,
-}
+pub struct GenKeyArgs {}
 
 #[derive(Args)]
 pub struct ConstructArgs {
-    /// The public part of an RSA keypair
+    /// The public part of the crypto keypair
     #[arg(short, long, value_name = "FILE")]
     pub key: PathBuf,
+    /// Connect to these Tor control ports to receive data.
+    #[arg(short, long, value_name = "PORT")]
+    pub ports: Vec<u16>,
 }
 
 #[derive(Args)]
 pub struct DeconstructArgs {
-    /// The private part of an RSA keypair
+    /// The private part of the crypto keypair
     #[arg(short, long, value_name = "FILE")]
     pub key: PathBuf,
+    /// The encrypted file to decrypt
+    #[arg(short, long, value_name = "FILE")]
+    pub ciphertext: PathBuf,
 }
 
 pub fn parse_cli() -> Cli {
