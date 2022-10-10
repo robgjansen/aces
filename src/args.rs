@@ -26,17 +26,17 @@ pub struct Cli {
 pub enum Commands {
     /// Generate a crypto keypair
     GenKey(GenKeyArgs),
-    /// Collate data streams into compressed and encrypted files
-    Construct(ConstructArgs),
-    /// Decrypt and decompress previously constructed files
-    Deconstruct(DeconstructArgs),
+    /// Collate data streams into encrypted files
+    Encrypt(EncryptArgs),
+    /// Decrypt previously encrypted files
+    Decrypt(DecryptArgs),
 }
 
 #[derive(Args)]
 pub struct GenKeyArgs {}
 
 #[derive(Args)]
-pub struct ConstructArgs {
+pub struct EncryptArgs {
     /// The public part of the crypto keypair
     #[arg(short, long, value_name = "FILE")]
     pub key: PathBuf,
@@ -46,7 +46,7 @@ pub struct ConstructArgs {
 }
 
 #[derive(Args)]
-pub struct DeconstructArgs {
+pub struct DecryptArgs {
     /// The private part of the crypto keypair
     #[arg(short, long, value_name = "FILE")]
     pub key: PathBuf,

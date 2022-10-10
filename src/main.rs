@@ -3,7 +3,7 @@ mod crypto;
 
 use std::{
     fs::File,
-    io::{Cursor, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -14,7 +14,7 @@ use env_logger::{Builder, Target};
 use log::LevelFilter;
 
 use crate::{
-    args::{Commands, ConstructArgs, DeconstructArgs, GenKeyArgs, LogLevel},
+    args::{Commands, DecryptArgs, EncryptArgs, GenKeyArgs, LogLevel},
     crypto::Encryptor,
 };
 
@@ -40,13 +40,13 @@ fn main() {
             log::info!("Running gen-key subcommand");
             run_genkey(args)
         }
-        Some(Commands::Construct(args)) => {
-            log::info!("Running construct subcommand");
-            run_construct(args)
+        Some(Commands::Encrypt(args)) => {
+            log::info!("Running encrypt subcommand");
+            run_encrypt(args)
         }
-        Some(Commands::Deconstruct(args)) => {
-            log::info!("Running deconstruct subcommand");
-            run_deconstruct(args)
+        Some(Commands::Decrypt(args)) => {
+            log::info!("Running decrypt subcommand");
+            run_decrypt(args)
         }
         None => {}
     }
@@ -61,12 +61,10 @@ fn run_genkey(_args: GenKeyArgs) {
 }
 
 fn get_input() -> impl Read {
-    let mut buf: Vec<u8> = Vec::with_capacity(32);
-    buf.extend(std::iter::repeat(7).take(32));
-    Cursor::new(buf)
+    File::open("plain").unwrap()
 }
 
-fn run_construct(args: ConstructArgs) {
+fn run_encrypt(args: EncryptArgs) {
     let pub_key = crypto::read_public_key(&args.key).unwrap();
 
     let mut outfile = {
@@ -87,7 +85,7 @@ fn run_construct(args: ConstructArgs) {
     outfile.flush().unwrap();
 }
 
-fn run_deconstruct(args: DeconstructArgs) {
+fn run_decrypt(args: DecryptArgs) {
     let sec_key = crypto::read_secret_key(&args.key).unwrap();
 
     let infilename = &args.ciphertext;
