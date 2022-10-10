@@ -53,11 +53,15 @@ fn main() {
 }
 
 fn run_genkey(_args: GenKeyArgs) {
+    log::info!("Generating key pair");
+
     crypto::generate_and_write_key_pair(
         &PathBuf::from("./aces.sec.key"),
         &PathBuf::from("./aces.pub.key"),
     )
     .expect("Unable to write keys");
+
+    log::info!("Keys written! Use aces.pub.key to encrypt and aces.sec.key to decrypt.");
 }
 
 fn get_input() -> impl Read {
@@ -65,6 +69,7 @@ fn get_input() -> impl Read {
 }
 
 fn run_encrypt(args: EncryptArgs) {
+    log::info!("Reading public key file at {}", &args.key.to_string_lossy());
     let pub_key = crypto::read_public_key(&args.key).unwrap();
 
     let mut outfile = {
@@ -73,16 +78,24 @@ fn run_encrypt(args: EncryptArgs) {
             let current_ts = Utc::now().format("%Y-%m-%d_%H:%M:%S_UTC");
             format!("./aces_msgs_{}_{:03}.txt.enc", current_ts, random_num)
         };
+
+        log::info!("Encrypted output will be written to {}", &filename);
+
         File::create(Path::new(&filename)).unwrap()
     };
 
+    log::info!("Initializing encryptor...");
     let mut encryptor = Encryptor::new(pub_key);
     encryptor.start(&mut outfile).unwrap();
+
+    log::info!("Encrypting all data from the input stream...");
     encryptor
         .encrypt_all(&mut get_input(), &mut outfile)
         .unwrap();
     encryptor.finish(&mut outfile).unwrap();
     outfile.flush().unwrap();
+
+    log::info!("Success!");
 }
 
 fn run_decrypt(args: DecryptArgs) {
@@ -92,12 +105,18 @@ fn run_decrypt(args: DecryptArgs) {
     let mut infile = File::open(infilename).unwrap();
     let mut outfile = {
         let filename = infilename.file_stem().unwrap();
+        log::info!("Decrypted output will be written to {}", &filename.to_string_lossy());
         File::create(Path::new(&filename)).unwrap()
     };
 
+    log::info!("Initializing decryptor...");
     let mut decryptor = Decryptor::new(sec_key);
     decryptor.start(&mut infile).unwrap();
+
+    log::info!("Decrypting all data from the ciphertext file...");
     decryptor.decrypt_all(&mut infile, &mut outfile).unwrap();
     decryptor.finish(&mut outfile).unwrap();
     outfile.flush().unwrap();
+
+    log::info!("Success!");
 }
