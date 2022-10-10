@@ -1,5 +1,5 @@
+use anyhow;
 use bytes::{Buf, BytesMut};
-
 use crypto_box::{
     aead::{Aead, AeadCore, OsRng, Payload},
     ChaChaBox, Nonce, PublicKey, SecretKey,
@@ -7,35 +7,37 @@ use crypto_box::{
 
 use std::{
     fs::File,
-    io::{self, Read, Write},
+    io::{Read, Write},
     path::PathBuf,
 };
 
-pub fn write_public_key(key: &PublicKey, path: &PathBuf) -> io::Result<()> {
+pub fn write_public_key(key: &PublicKey, path: &PathBuf) -> anyhow::Result<()> {
     log::info!("Saving public key to {}", path.to_string_lossy());
-    File::create(path)?.write_all(key.as_bytes())
+    File::create(path)?.write_all(key.as_bytes())?;
+    Ok(())
 }
 
-pub fn read_public_key(path: &PathBuf) -> io::Result<PublicKey> {
+pub fn read_public_key(path: &PathBuf) -> anyhow::Result<PublicKey> {
     log::info!("Loading public key from {}", path.to_string_lossy());
     let mut buf = [0; 32];
     File::open(path)?.read_exact(&mut buf)?;
     Ok(PublicKey::from(buf))
 }
 
-pub fn write_secret_key(key: &SecretKey, path: &PathBuf) -> io::Result<()> {
+pub fn write_secret_key(key: &SecretKey, path: &PathBuf) -> anyhow::Result<()> {
     log::info!("Saving secret key to {}", path.to_string_lossy());
-    File::create(path)?.write_all(key.as_bytes())
+    File::create(path)?.write_all(key.as_bytes())?;
+    Ok(())
 }
 
-pub fn read_secret_key(path: &PathBuf) -> io::Result<SecretKey> {
+pub fn read_secret_key(path: &PathBuf) -> anyhow::Result<SecretKey> {
     log::info!("Loading secret key from {}", path.to_string_lossy());
     let mut buf = [0; 32];
     File::open(path)?.read_exact(&mut buf)?;
     Ok(SecretKey::from(buf))
 }
 
-pub fn generate_and_write_key_pair(sec_path: &PathBuf, pub_path: &PathBuf) -> io::Result<()> {
+pub fn generate_and_write_key_pair(sec_path: &PathBuf, pub_path: &PathBuf) -> anyhow::Result<()> {
     let sec_key = SecretKey::generate(&mut OsRng);
     let pub_key = sec_key.public_key();
     write_secret_key(&sec_key, sec_path)?;
@@ -65,16 +67,17 @@ impl Encryptor {
 
     /// Writes our generated public key that will be needed to decrypt the
     /// encrypted message that we produce.
-    pub fn start<W>(&self, output: &mut W) -> io::Result<()>
+    pub fn start<W>(&self, output: &mut W) -> anyhow::Result<()>
     where
         W: Write,
     {
-        output.write_all(self.key.as_ref())
+        output.write_all(self.key.as_ref())?;
+        Ok(())
     }
 
     /// Encrypt the plaintext input and write the nonce and ciphertext to the
     /// output.
-    pub fn encrypt_all<R, W>(&mut self, input: &mut R, output: &mut W) -> io::Result<()>
+    pub fn encrypt_all<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
     where
         R: Read,
         W: Write,
@@ -95,7 +98,7 @@ impl Encryptor {
         }
     }
 
-    fn write_encrypted_message<W>(&mut self, msg: BytesMut, output: &mut W) -> io::Result<()>
+    fn write_encrypted_message<W>(&mut self, msg: BytesMut, output: &mut W) -> anyhow::Result<()>
     where
         W: Write,
     {
@@ -106,13 +109,17 @@ impl Encryptor {
             aad: nonce.as_ref(),
         };
 
-        let ciphertext = self.crypto_box.encrypt(&nonce, payload).unwrap();
+        let ciphertext = match self.crypto_box.encrypt(&nonce, payload) {
+            Ok(vec) => vec,
+            Err(e) => anyhow::bail!(e),
+        };
 
         output.write_all(nonce.as_ref())?;
-        output.write_all(ciphertext.as_slice())
+        output.write_all(ciphertext.as_slice())?;
+        Ok(())
     }
 
-    pub fn finish<W>(&mut self, output: &mut W) -> io::Result<()>
+    pub fn finish<W>(&mut self, output: &mut W) -> anyhow::Result<()>
     where
         W: Write,
     {
@@ -140,7 +147,7 @@ impl Decryptor {
         }
     }
 
-    pub fn start<R>(&mut self, input: &mut R) -> io::Result<()>
+    pub fn start<R>(&mut self, input: &mut R) -> anyhow::Result<()>
     where
         R: Read,
     {
@@ -154,7 +161,7 @@ impl Decryptor {
         Ok(())
     }
 
-    pub fn decrypt_all<R, W>(&mut self, input: &mut R, output: &mut W) -> io::Result<()>
+    pub fn decrypt_all<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
     where
         R: Read,
         W: Write,
@@ -175,7 +182,11 @@ impl Decryptor {
         }
     }
 
-    fn write_decrypted_message<W>(&mut self, mut msg: BytesMut, output: &mut W) -> io::Result<()>
+    fn write_decrypted_message<W>(
+        &mut self,
+        mut msg: BytesMut,
+        output: &mut W,
+    ) -> anyhow::Result<()>
     where
         W: Write,
     {
@@ -196,11 +207,15 @@ impl Decryptor {
             aad: nonce.as_ref(),
         };
 
-        let plaintext = crypto_box.decrypt(&nonce, payload).unwrap();
-        output.write_all(plaintext.as_ref())
+        let plaintext = match crypto_box.decrypt(&nonce, payload) {
+            Ok(vec) => vec,
+            Err(e) => anyhow::bail!(e),
+        };
+        output.write_all(plaintext.as_ref())?;
+        Ok(())
     }
 
-    pub fn finish<W>(&mut self, output: &mut W) -> io::Result<()>
+    pub fn finish<W>(&mut self, output: &mut W) -> anyhow::Result<()>
     where
         W: Write,
     {
@@ -227,7 +242,7 @@ mod tests {
         Cursor::new(buf)
     }
 
-    fn run_pipeline(plaintext_len: usize) {
+    fn run_pipeline(plaintext_len: usize) -> anyhow::Result<()> {
         // Once per file: 32 bytes for pub_key
         // Once per msg: 24 bytes for nonce, 16 for mac
         let num_msgs = (plaintext_len + PLAINTEXT_MSG_LEN - 1) / PLAINTEXT_MSG_LEN;
@@ -242,68 +257,70 @@ mod tests {
         let mut enc = Encryptor::new(key.public_key());
 
         // writes the pub key
-        enc.start(&mut encrypted).unwrap();
+        enc.start(&mut encrypted)?;
         assert_eq!(encrypted.position(), 32);
 
         // plaintext completely read
-        enc.encrypt_all(&mut plaintext, &mut encrypted).unwrap();
+        enc.encrypt_all(&mut plaintext, &mut encrypted)?;
         assert_eq!(plaintext.position() as usize, plaintext_len);
 
         // ciphertext completely written
-        enc.finish(&mut encrypted).unwrap();
+        enc.finish(&mut encrypted)?;
         assert_eq!(encrypted.position() as usize, ciphertext_len);
 
         // reset encrypted output to use as input to decryption
-        encrypted.seek(SeekFrom::Start(0)).unwrap();
+        encrypted.seek(SeekFrom::Start(0))?;
 
         // decrypt
         let mut dec = Decryptor::new(key);
 
         // reads the pub key
-        dec.start(&mut encrypted).unwrap();
+        dec.start(&mut encrypted)?;
         assert_eq!(encrypted.position(), 32);
 
         // ciphertext completely read
-        dec.decrypt_all(&mut encrypted, &mut decrypted).unwrap();
+        dec.decrypt_all(&mut encrypted, &mut decrypted)?;
         assert_eq!(encrypted.position() as usize, ciphertext_len);
 
         // plaintext completely written
-        dec.finish(&mut decrypted).unwrap();
+        dec.finish(&mut decrypted)?;
         assert_eq!(decrypted.position() as usize, plaintext_len);
 
         assert_eq!(
             &plaintext.into_inner().as_slice(),
             &decrypted.into_inner().as_slice()
         );
+
+        Ok(())
     }
 
     #[test]
     fn plaintext_len_zero() {
-        run_pipeline(0)
+        assert!(run_pipeline(0).is_ok())
     }
 
     #[test]
     fn plaintext_len_one() {
-        run_pipeline(1)
+        assert!(run_pipeline(1).is_ok())
     }
 
     #[test]
     fn plaintext_len_n_minus_one() {
-        run_pipeline(PLAINTEXT_MSG_LEN - 1)
+        assert!(run_pipeline(PLAINTEXT_MSG_LEN - 1).is_ok())
     }
 
     #[test]
     fn plaintext_len_n() {
-        run_pipeline(PLAINTEXT_MSG_LEN)
+        assert!(run_pipeline(PLAINTEXT_MSG_LEN).is_ok())
     }
 
     #[test]
     fn plaintext_len_n_plus_one() {
-        run_pipeline(PLAINTEXT_MSG_LEN + 1)
+        assert!(run_pipeline(PLAINTEXT_MSG_LEN + 1).is_ok())
     }
 
     #[test]
     fn plaintext_len_n_times_two() {
-        run_pipeline(PLAINTEXT_MSG_LEN * 2)
+        assert!(run_pipeline(PLAINTEXT_MSG_LEN * 2).is_ok())
     }
 }

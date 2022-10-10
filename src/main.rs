@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use anyhow::Context;
 use chrono::Utc;
 use crypto::Decryptor;
 use crypto_box::rand_core::{OsRng, RngCore};
@@ -35,7 +36,7 @@ fn main() {
         .init();
     log::info!("Parsed CLI args and initialized logger!");
 
-    match cli.command {
+    let result = match cli.command {
         Some(Commands::GenKey(args)) => {
             log::info!("Running gen-key subcommand");
             run_genkey(args)
@@ -48,29 +49,37 @@ fn main() {
             log::info!("Running decrypt subcommand");
             run_decrypt(args)
         }
-        None => {}
+        None => Ok(()),
+    };
+
+    if let Err(e) = result {
+        log::error!("Error occurred: {}", e);
+        log::error!("Caused by: {}", e.root_cause());
     }
+    log::info!("Returning cleanly from main");
 }
 
-fn run_genkey(_args: GenKeyArgs) {
+fn run_genkey(_args: GenKeyArgs) -> anyhow::Result<()> {
     log::info!("Generating key pair");
 
     crypto::generate_and_write_key_pair(
         &PathBuf::from("./aces.sec.key"),
         &PathBuf::from("./aces.pub.key"),
-    )
-    .expect("Unable to write keys");
+    )?;
 
     log::info!("Keys written! Use aces.pub.key to encrypt and aces.sec.key to decrypt.");
+    Ok(())
 }
 
-fn get_input() -> impl Read {
-    File::open("plain").unwrap()
+fn get_input() -> anyhow::Result<impl Read> {
+    Ok(File::open("plain")?)
 }
 
-fn run_encrypt(args: EncryptArgs) {
+fn run_encrypt(args: EncryptArgs) -> anyhow::Result<()> {
+    let mut input = get_input().context("Failed to get input source")?;
+
     log::info!("Reading public key file at {}", &args.key.to_string_lossy());
-    let pub_key = crypto::read_public_key(&args.key).unwrap();
+    let pub_key = crypto::read_public_key(&args.key).context("Failed to read public key")?;
 
     let mut outfile = {
         let filename = {
@@ -81,42 +90,66 @@ fn run_encrypt(args: EncryptArgs) {
 
         log::info!("Encrypted output will be written to {}", &filename);
 
-        File::create(Path::new(&filename)).unwrap()
+        File::create(Path::new(&filename))
+            .context(std::format!("Failed to create output file {}", &filename))?
     };
 
     log::info!("Initializing encryptor...");
     let mut encryptor = Encryptor::new(pub_key);
-    encryptor.start(&mut outfile).unwrap();
+    encryptor
+        .start(&mut outfile)
+        .context("Failed to start encryptor")?;
 
     log::info!("Encrypting all data from the input stream...");
     encryptor
-        .encrypt_all(&mut get_input(), &mut outfile)
-        .unwrap();
-    encryptor.finish(&mut outfile).unwrap();
-    outfile.flush().unwrap();
+        .encrypt_all(&mut input, &mut outfile)
+        .context("Failure while running encryptor")?;
+    encryptor
+        .finish(&mut outfile)
+        .context("Failed to finish encryptor")?;
+    outfile.flush()?;
 
     log::info!("Success!");
+    Ok(())
 }
 
-fn run_decrypt(args: DecryptArgs) {
-    let sec_key = crypto::read_secret_key(&args.key).unwrap();
+fn run_decrypt(args: DecryptArgs) -> anyhow::Result<()> {
+    let sec_key = crypto::read_secret_key(&args.key).context(std::format!(
+        "Failed to read secret key {}",
+        &args.key.to_string_lossy()
+    ))?;
 
     let infilename = &args.ciphertext;
-    let mut infile = File::open(infilename).unwrap();
+    let mut infile = File::open(infilename)?;
     let mut outfile = {
-        let filename = infilename.file_stem().unwrap();
-        log::info!("Decrypted output will be written to {}", &filename.to_string_lossy());
-        File::create(Path::new(&filename)).unwrap()
+        let filename = infilename
+            .file_stem()
+            .context("Input filename has no stem")?;
+        log::info!(
+            "Decrypted output will be written to {}",
+            &filename.to_string_lossy()
+        );
+        File::create(Path::new(&filename)).context(std::format!(
+            "Failed to open input file {}",
+            &filename.to_string_lossy()
+        ))?
     };
 
     log::info!("Initializing decryptor...");
     let mut decryptor = Decryptor::new(sec_key);
-    decryptor.start(&mut infile).unwrap();
+    decryptor
+        .start(&mut infile)
+        .context("Failed to start decryptor")?;
 
     log::info!("Decrypting all data from the ciphertext file...");
-    decryptor.decrypt_all(&mut infile, &mut outfile).unwrap();
-    decryptor.finish(&mut outfile).unwrap();
-    outfile.flush().unwrap();
+    decryptor
+        .decrypt_all(&mut infile, &mut outfile)
+        .context("Failure while running decryptor")?;
+    decryptor
+        .finish(&mut outfile)
+        .context("Failed to finish decryptor")?;
+    outfile.flush()?;
 
     log::info!("Success!");
+    Ok(())
 }
