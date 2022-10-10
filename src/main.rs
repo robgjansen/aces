@@ -3,7 +3,7 @@ mod crypto;
 
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -71,15 +71,22 @@ fn run_genkey(_args: GenKeyArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn get_input() -> anyhow::Result<impl Read> {
-    Ok(File::open("plain")?)
-}
-
 fn run_encrypt(args: EncryptArgs) -> anyhow::Result<()> {
-    let mut input = get_input().context("Failed to get input source")?;
+    let pub_key = crypto::read_public_key(&args.key).context(std::format!(
+        "Failed to read public key {}",
+        &args.key.to_string_lossy()
+    ))?;
 
-    log::info!("Reading public key file at {}", &args.key.to_string_lossy());
-    let pub_key = crypto::read_public_key(&args.key).context("Failed to read public key")?;
+    let infile_opt = {
+        if args.plaintext.as_os_str().eq("-") {
+            None
+        } else {
+            Some(File::open(&args.plaintext).context(std::format!(
+                "Failed to open input file {}",
+                &args.plaintext.to_string_lossy()
+            ))?)
+        }
+    };
 
     let mut outfile = {
         let filename = {
@@ -94,16 +101,21 @@ fn run_encrypt(args: EncryptArgs) -> anyhow::Result<()> {
             .context(std::format!("Failed to create output file {}", &filename))?
     };
 
-    log::info!("Initializing encryptor...");
+    log::info!("Initializing encryptor");
     let mut encryptor = Encryptor::new(pub_key);
     encryptor
         .start(&mut outfile)
         .context("Failed to start encryptor")?;
 
     log::info!("Encrypting all data from the input stream...");
-    encryptor
-        .encrypt_all(&mut input, &mut outfile)
-        .context("Failure while running encryptor")?;
+    match infile_opt {
+        Some(mut infile) => encryptor
+            .encrypt_all(&mut infile, &mut outfile)
+            .context("Failure while running encryptor")?,
+        None => encryptor
+            .encrypt_all(&mut std::io::stdin(), &mut outfile)
+            .context("Failure while running encryptor")?,
+    }
     encryptor
         .finish(&mut outfile)
         .context("Failed to finish encryptor")?;
@@ -119,10 +131,14 @@ fn run_decrypt(args: DecryptArgs) -> anyhow::Result<()> {
         &args.key.to_string_lossy()
     ))?;
 
-    let infilename = &args.ciphertext;
-    let mut infile = File::open(infilename)?;
+    let mut infile = File::open(&args.ciphertext).context(std::format!(
+        "Failed to open input file {}",
+        &args.ciphertext.to_string_lossy()
+    ))?;
+
     let mut outfile = {
-        let filename = infilename
+        let filename = &args
+            .ciphertext
             .file_stem()
             .context("Input filename has no stem")?;
         log::info!(
@@ -130,12 +146,12 @@ fn run_decrypt(args: DecryptArgs) -> anyhow::Result<()> {
             &filename.to_string_lossy()
         );
         File::create(Path::new(&filename)).context(std::format!(
-            "Failed to open input file {}",
+            "Failed to create output file {}",
             &filename.to_string_lossy()
         ))?
     };
 
-    log::info!("Initializing decryptor...");
+    log::info!("Initializing decryptor");
     let mut decryptor = Decryptor::new(sec_key);
     decryptor
         .start(&mut infile)

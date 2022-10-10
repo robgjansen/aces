@@ -26,7 +26,7 @@ pub struct Cli {
 pub enum Commands {
     /// Generate a crypto keypair
     GenKey(GenKeyArgs),
-    /// Collate data streams into encrypted files
+    /// Encrypt data streams and write to files
     Encrypt(EncryptArgs),
     /// Decrypt previously encrypted files
     Decrypt(DecryptArgs),
@@ -40,9 +40,9 @@ pub struct EncryptArgs {
     /// The public part of the crypto keypair
     #[arg(short, long, value_name = "FILE")]
     pub key: PathBuf,
-    /// Connect to these Tor control ports to receive data.
-    #[arg(short, long, value_name = "PORT")]
-    pub ports: Vec<u16>,
+    /// The input file to encrypt, or '-' for stdin
+    #[arg(short, long, value_name = "FILE")]
+    pub plaintext: PathBuf,
 }
 
 #[derive(Args)]
