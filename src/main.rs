@@ -101,24 +101,15 @@ fn run_encrypt(args: EncryptArgs) -> anyhow::Result<()> {
             .context(std::format!("Failed to create output file {}", &filename))?
     };
 
-    log::info!("Initializing encryptor");
-    let mut encryptor = Encryptor::new(pub_key);
-    encryptor
-        .start(&mut outfile)
-        .context("Failed to start encryptor")?;
-
     log::info!("Encrypting all data from the input stream...");
     match infile_opt {
-        Some(mut infile) => encryptor
+        Some(mut infile) => Encryptor::new(pub_key)
             .encrypt_all(&mut infile, &mut outfile)
             .context("Failure while running encryptor")?,
-        None => encryptor
+        None => Encryptor::new(pub_key)
             .encrypt_all(&mut std::io::stdin(), &mut outfile)
             .context("Failure while running encryptor")?,
     }
-    encryptor
-        .finish(&mut outfile)
-        .context("Failed to finish encryptor")?;
     outfile.flush()?;
 
     log::info!("Success!");
@@ -151,19 +142,10 @@ fn run_decrypt(args: DecryptArgs) -> anyhow::Result<()> {
         ))?
     };
 
-    log::info!("Initializing decryptor");
-    let mut decryptor = Decryptor::new(sec_key);
-    decryptor
-        .start(&mut infile)
-        .context("Failed to start decryptor")?;
-
     log::info!("Decrypting all data from the ciphertext file...");
-    decryptor
+    Decryptor::new(sec_key)
         .decrypt_all(&mut infile, &mut outfile)
         .context("Failure while running decryptor")?;
-    decryptor
-        .finish(&mut outfile)
-        .context("Failed to finish decryptor")?;
     outfile.flush()?;
 
     log::info!("Success!");

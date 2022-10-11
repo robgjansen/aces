@@ -44,7 +44,7 @@ pub fn generate_and_write_key_pair(sec_path: &PathBuf, pub_path: &PathBuf) -> an
     write_public_key(&pub_key, pub_path)
 }
 
-const PLAINTEXT_MSG_LEN: usize = 2usize.pow(16u32); // 65 KiB per payload
+const PLAINTEXT_MSG_LEN: usize = 2usize.pow(16u32); // 64 KiB per payload
 const CIPHERTEXT_MSG_LEN: usize = PLAINTEXT_MSG_LEN + 24 + 16; // nonce + mac
 
 pub struct Encryptor {
@@ -65,9 +65,30 @@ impl Encryptor {
         }
     }
 
+    /// Reads plaintexts from the input, encrypts, and writes ciphertexts to the output.
+    ///
+    /// This function writes out an encrypted 'package' that consists of:
+    /// - The public key needed for decryption [32 bytes]
+    /// - A number of encrypted messages, where each message consists of:
+    ///   - The nonce needed for decryption [24 bytes]
+    ///   - The encrypted version of the plaintext payload [64 KiB]
+    ///   - The message MAC [16 bytes]
+    ///
+    /// Note that the last message written may be truncated if there was less
+    /// than 64 KiB of plaintext payload available.
+    pub fn encrypt_all<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
+    where
+        R: Read,
+        W: Write,
+    {
+        self.start(output)?;
+        self.run_encrypt_loop(input, output)?;
+        self.finish(output)
+    }
+
     /// Writes our generated public key that will be needed to decrypt the
     /// encrypted message that we produce.
-    pub fn start<W>(&self, output: &mut W) -> anyhow::Result<()>
+    fn start<W>(&self, output: &mut W) -> anyhow::Result<()>
     where
         W: Write,
     {
@@ -77,7 +98,7 @@ impl Encryptor {
 
     /// Encrypt the plaintext input and write the nonce and ciphertext to the
     /// output.
-    pub fn encrypt_all<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
+    fn run_encrypt_loop<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
     where
         R: Read,
         W: Write,
@@ -119,7 +140,7 @@ impl Encryptor {
         Ok(())
     }
 
-    pub fn finish<W>(&mut self, output: &mut W) -> anyhow::Result<()>
+    fn finish<W>(&mut self, output: &mut W) -> anyhow::Result<()>
     where
         W: Write,
     {
@@ -147,7 +168,20 @@ impl Decryptor {
         }
     }
 
-    pub fn start<R>(&mut self, input: &mut R) -> anyhow::Result<()>
+    /// Reads ciphertexts from the input, decrypts, and writes plaintexts to the output.
+    /// This function expects the input to contain the encrypted 'package' produced by
+    /// `Encryptor::encrypt_all` and will extract the decryption material accordingly.
+    pub fn decrypt_all<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
+    where
+        R: Read,
+        W: Write,
+    {
+        self.start(input)?;
+        self.run_decrypt_loop(input, output)?;
+        self.finish(output)
+    }
+
+    fn start<R>(&mut self, input: &mut R) -> anyhow::Result<()>
     where
         R: Read,
     {
@@ -161,7 +195,7 @@ impl Decryptor {
         Ok(())
     }
 
-    pub fn decrypt_all<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
+    fn run_decrypt_loop<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
     where
         R: Read,
         W: Write,
@@ -215,7 +249,7 @@ impl Decryptor {
         Ok(())
     }
 
-    pub fn finish<W>(&mut self, output: &mut W) -> anyhow::Result<()>
+    fn finish<W>(&mut self, output: &mut W) -> anyhow::Result<()>
     where
         W: Write,
     {
@@ -261,7 +295,7 @@ mod tests {
         assert_eq!(encrypted.position(), 32);
 
         // plaintext completely read
-        enc.encrypt_all(&mut plaintext, &mut encrypted)?;
+        enc.run_encrypt_loop(&mut plaintext, &mut encrypted)?;
         assert_eq!(plaintext.position() as usize, plaintext_len);
 
         // ciphertext completely written
@@ -279,7 +313,7 @@ mod tests {
         assert_eq!(encrypted.position(), 32);
 
         // ciphertext completely read
-        dec.decrypt_all(&mut encrypted, &mut decrypted)?;
+        dec.run_decrypt_loop(&mut encrypted, &mut decrypted)?;
         assert_eq!(encrypted.position() as usize, ciphertext_len);
 
         // plaintext completely written
