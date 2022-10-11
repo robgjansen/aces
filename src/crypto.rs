@@ -44,7 +44,7 @@ pub fn generate_and_write_key_pair(sec_path: &PathBuf, pub_path: &PathBuf) -> an
     write_public_key(&pub_key, pub_path)
 }
 
-const PLAINTEXT_MSG_LEN: usize = 2usize.pow(16u32); // 16 KiB per payload
+const PLAINTEXT_MSG_LEN: usize = 2usize.pow(16u32); // 65 KiB per payload
 const CIPHERTEXT_MSG_LEN: usize = PLAINTEXT_MSG_LEN + 24 + 16; // nonce + mac
 
 pub struct Encryptor {
