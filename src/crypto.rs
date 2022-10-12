@@ -1,4 +1,4 @@
-use anyhow;
+use anyhow::{self, bail};
 use bytes::{Buf, BytesMut};
 use crypto_box::{
     aead::{Aead, AeadCore, OsRng, Payload},
@@ -7,7 +7,7 @@ use crypto_box::{
 
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::{Read, Write, ErrorKind},
     path::PathBuf,
 };
 
@@ -105,11 +105,17 @@ impl Encryptor {
     {
         let mut read_buf: [u8; PLAINTEXT_MSG_LEN] = [0; PLAINTEXT_MSG_LEN];
         loop {
-            let num_read = input.read(&mut read_buf)?;
+            let num_read = match input.read(&mut read_buf) {
+                Ok(n) => n,
+                Err(e) => match e.kind() {
+                    ErrorKind::Interrupted => continue,
+                    _ => bail!(e)
+                },
+            };
 
-            match num_read > 0 {
-                true => self.msg_buf.extend(&read_buf[..num_read]),
-                false => return Ok(()),
+            match num_read {
+                0 => return Ok(()),
+                _ => self.msg_buf.extend(&read_buf[..num_read]),
             }
 
             while self.msg_buf.len() >= PLAINTEXT_MSG_LEN {
@@ -202,11 +208,17 @@ impl Decryptor {
     {
         let mut read_buf: [u8; CIPHERTEXT_MSG_LEN] = [0; CIPHERTEXT_MSG_LEN];
         loop {
-            let num_read = input.read(&mut read_buf)?;
+            let num_read = match input.read(&mut read_buf) {
+                Ok(n) => n,
+                Err(e) => match e.kind() {
+                    ErrorKind::Interrupted => continue,
+                    _ => bail!(e)
+                },
+            };
 
-            match num_read > 0 {
-                true => self.msg_buf.extend(&read_buf[..num_read]),
-                false => return Ok(()),
+            match num_read {
+                0 => return Ok(()),
+                _ => self.msg_buf.extend(&read_buf[..num_read]),
             }
 
             while self.msg_buf.len() >= CIPHERTEXT_MSG_LEN {
