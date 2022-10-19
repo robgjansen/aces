@@ -7,7 +7,7 @@ use crypto_box::{
 
 use std::{
     fs::File,
-    io::{Read, Write, ErrorKind},
+    io::{ErrorKind, Read, Write},
     path::PathBuf,
 };
 
@@ -109,7 +109,7 @@ impl Encryptor {
                 Ok(n) => n,
                 Err(e) => match e.kind() {
                     ErrorKind::Interrupted => continue,
-                    _ => bail!(e)
+                    _ => bail!(e),
                 },
             };
 
@@ -212,7 +212,7 @@ impl Decryptor {
                 Ok(n) => n,
                 Err(e) => match e.kind() {
                     ErrorKind::Interrupted => continue,
-                    _ => bail!(e)
+                    _ => bail!(e),
                 },
             };
 

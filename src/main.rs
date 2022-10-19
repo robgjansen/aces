@@ -3,19 +3,20 @@ mod crypto;
 
 use std::{
     fs::File,
-    io::Write,
-    path::{Path, PathBuf},
+    io::{Read, Write},
+    path::PathBuf,
 };
 
 use anyhow::Context;
+use args::{EncryptFileArgs, EncryptTorArgs};
 use chrono::Utc;
 use crypto::Decryptor;
-use crypto_box::rand_core::{OsRng, RngCore};
+use crypto_box::{PublicKey, SecretKey};
 use env_logger::{Builder, Target};
 use log::LevelFilter;
 
 use crate::{
-    args::{Commands, DecryptArgs, EncryptArgs, GenKeyArgs, LogLevel},
+    args::{Commands, DecryptArgs, EncryptArgs, EncryptInputs, GenKeyArgs, LogLevel},
     crypto::Encryptor,
 };
 
@@ -31,25 +32,24 @@ fn main() {
     };
 
     Builder::new()
-        .target(Target::Stdout)
+        .target(Target::Stderr)
         .filter_level(level)
         .init();
     log::info!("Parsed CLI args and initialized logger!");
 
     let result = match cli.command {
-        Some(Commands::GenKey(args)) => {
+        Commands::GenKey(args) => {
             log::info!("Running gen-key subcommand");
-            run_genkey(args)
+            run_genkey(&args)
         }
-        Some(Commands::Encrypt(args)) => {
+        Commands::Encrypt(args) => {
             log::info!("Running encrypt subcommand");
-            run_encrypt(args)
+            run_encrypt(&args)
         }
-        Some(Commands::Decrypt(args)) => {
+        Commands::Decrypt(args) => {
             log::info!("Running decrypt subcommand");
-            run_decrypt(args)
+            run_decrypt(&args)
         }
-        None => Ok(()),
     };
 
     if let Err(e) = result {
@@ -59,7 +59,7 @@ fn main() {
     log::info!("Returning cleanly from main");
 }
 
-fn run_genkey(_args: GenKeyArgs) -> anyhow::Result<()> {
+fn run_genkey(_args: &GenKeyArgs) -> anyhow::Result<()> {
     log::info!("Generating key pair");
 
     crypto::generate_and_write_key_pair(
@@ -71,83 +71,153 @@ fn run_genkey(_args: GenKeyArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_encrypt(args: EncryptArgs) -> anyhow::Result<()> {
-    let pub_key = crypto::read_public_key(&args.key).context(std::format!(
-        "Failed to read public key {}",
-        &args.key.to_string_lossy()
-    ))?;
-
-    let infile_opt = {
-        if args.plaintext.as_os_str().eq("-") {
-            None
-        } else {
-            Some(File::open(&args.plaintext).context(std::format!(
-                "Failed to open input file {}",
-                &args.plaintext.to_string_lossy()
-            ))?)
+fn run_encrypt(args: &EncryptArgs) -> anyhow::Result<()> {
+    match &args.input {
+        EncryptInputs::File(file_args) => {
+            log::info!("Running encrypt file subcommand");
+            run_encrypt_file(args, file_args)
         }
-    };
-
-    let mut outfile = {
-        let filename = {
-            let random_num = OsRng.next_u32() as u8;
-            let current_ts = Utc::now().format("%Y-%m-%d_%H:%M:%S_UTC");
-            format!("./aces_msgs_{}_{:03}.txt.enc", current_ts, random_num)
-        };
-
-        log::info!("Encrypted output will be written to {}", &filename);
-
-        File::create(Path::new(&filename))
-            .context(std::format!("Failed to create output file {}", &filename))?
-    };
-
-    log::info!("Encrypting all data from the input stream...");
-    match infile_opt {
-        Some(mut infile) => Encryptor::new(pub_key)
-            .encrypt_all(&mut infile, &mut outfile)
-            .context("Failure while running encryptor")?,
-        None => Encryptor::new(pub_key)
-            .encrypt_all(&mut std::io::stdin(), &mut outfile)
-            .context("Failure while running encryptor")?,
+        EncryptInputs::Tor(tor_args) => {
+            log::info!("Running encrypt tor subcommand");
+            run_encrypt_tor(args, tor_args)
+        }
     }
-    outfile.flush()?;
+}
+
+fn run_encrypt_file(args: &EncryptArgs, file_args: &EncryptFileArgs) -> anyhow::Result<()> {
+    let pub_key = get_pub_key(&args.key)?;
+
+    let mut input = get_data_source(&file_args.input)?;
+    let mut output = match &file_args.output {
+        Some(path) => get_data_sink(path)?,
+        None => get_data_sink(&gen_encrypt_outpath(
+            &file_args.input,
+            args.compress.unwrap(),
+        )?)?,
+    };
+
+    log::info!("Encrypting all data from the plaintext input stream...");
+
+    Encryptor::new(pub_key)
+        .encrypt_all(&mut input, &mut output)
+        .context("Failure while running encryptor")?;
+    output.flush()?;
 
     log::info!("Success!");
     Ok(())
 }
 
-fn run_decrypt(args: DecryptArgs) -> anyhow::Result<()> {
-    let sec_key = crypto::read_secret_key(&args.key).context(std::format!(
-        "Failed to read secret key {}",
-        &args.key.to_string_lossy()
-    ))?;
+fn run_encrypt_tor(_args: &EncryptArgs, _tor_args: &EncryptTorArgs) -> anyhow::Result<()> {
+    todo!()
+}
 
-    let mut infile = File::open(&args.ciphertext).context(std::format!(
-        "Failed to open input file {}",
-        &args.ciphertext.to_string_lossy()
-    ))?;
+fn run_decrypt(args: &DecryptArgs) -> anyhow::Result<()> {
+    let sec_key = get_sec_key(&args.key)?;
 
-    let mut outfile = {
-        let filename = &args
-            .ciphertext
-            .file_stem()
-            .context("Input filename has no stem")?;
-        log::info!(
-            "Decrypted output will be written to {}",
-            &filename.to_string_lossy()
-        );
-        File::create(Path::new(&filename)).context(std::format!(
-            "Failed to create output file {}",
-            &filename.to_string_lossy()
-        ))?
+    let mut input = get_data_source(&args.input)?;
+    let mut output = match &args.output {
+        Some(path) => get_data_sink(path)?,
+        None => get_data_sink(&gen_decrypt_outpath(&args.input, args.decompress.unwrap())?)?,
     };
 
-    log::info!("Decrypting all data from the ciphertext file...");
+    log::info!("Decrypting all data from the ciphertext input stream...");
+
     Decryptor::new(sec_key)
-        .decrypt_all(&mut infile, &mut outfile)
+        .decrypt_all(&mut input, &mut output)
         .context("Failure while running decryptor")?;
-    outfile.flush()?;
+    output.flush()?;
 
     log::info!("Success!");
     Ok(())
+}
+
+fn get_pub_key(key: &PathBuf) -> anyhow::Result<PublicKey> {
+    Ok(crypto::read_public_key(key).context(std::format!(
+        "Failed to read public key {}",
+        key.to_string_lossy()
+    ))?)
+}
+
+fn get_sec_key(key: &PathBuf) -> anyhow::Result<SecretKey> {
+    Ok(crypto::read_secret_key(key).context(std::format!(
+        "Failed to read secret key {}",
+        key.to_string_lossy()
+    ))?)
+}
+
+fn get_data_source(path: &PathBuf) -> anyhow::Result<Box<dyn Read>> {
+    if path.as_os_str().eq("-") {
+        log::info!("Using stdin reader");
+        Ok(Box::new(std::io::stdin()))
+    } else {
+        log::info!("Using file reader: {}", path.to_string_lossy());
+        let file = File::open(path).context(std::format!(
+            "Failed to open input file {}",
+            path.to_string_lossy()
+        ))?;
+        Ok(Box::new(file))
+    }
+}
+
+fn get_data_sink(path: &PathBuf) -> anyhow::Result<Box<dyn Write>> {
+    if path.as_os_str().eq("-") {
+        log::info!("Using stdout writer");
+        Ok(Box::new(std::io::stdout()))
+    } else {
+        log::info!("Using file writer: {}", path.to_string_lossy());
+        let file = File::create(path).context(std::format!(
+            "Failed to create output file {}",
+            path.to_string_lossy()
+        ))?;
+        Ok(Box::new(file))
+    }
+}
+
+fn gen_base_outpath(input: &PathBuf) -> PathBuf {
+    if input.as_os_str().eq("-") {
+        let current_ts = Utc::now().format("%Y-%m-%d_%H:%M:%S_UTC");
+        PathBuf::from(format!("./data_stream_{}", current_ts))
+    } else {
+        input.clone()
+    }
+}
+
+fn gen_encrypt_outpath(input: &PathBuf, compress: bool) -> anyhow::Result<PathBuf> {
+    let mut out = gen_base_outpath(input);
+
+    if compress {
+        out = out.with_extension(".zst");
+    }
+    out = out.with_extension(".ace");
+
+    if out.exists() {
+        anyhow::bail!(
+            "Refusing to write encrypted output to existing file: {}. Specify with -o.",
+            out.to_string_lossy()
+        );
+    }
+    Ok(out)
+}
+
+fn gen_decrypt_outpath(input: &PathBuf, decompress: bool) -> anyhow::Result<PathBuf> {
+    let mut out = gen_base_outpath(input);
+
+    if let Some(ext) = out.extension() {
+        if ext.eq("ace") {
+            out.set_extension("");
+        }
+    }
+    if let Some(ext) = out.extension() {
+        if decompress && ext.eq("zst") {
+            out.set_extension("");
+        }
+    }
+
+    if out.exists() {
+        anyhow::bail!(
+            "Refusing to write decrypted output to existing file: {}. Specify with -o.",
+            out.to_string_lossy()
+        );
+    }
+    Ok(out)
 }
