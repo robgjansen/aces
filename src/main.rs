@@ -3,21 +3,20 @@ mod crypto;
 
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::PathBuf,
 };
 
 use anyhow::Context;
 use args::{EncryptFileArgs, EncryptTorArgs};
 use chrono::Utc;
-use crypto::Decryptor;
 use crypto_box::{PublicKey, SecretKey};
 use env_logger::{Builder, Target};
 use log::LevelFilter;
 
 use crate::{
     args::{Commands, DecryptArgs, EncryptArgs, EncryptInputs, GenKeyArgs, LogLevel},
-    crypto::Encryptor,
+    crypto::{AutoDecryptor, AutoEncryptor},
 };
 
 fn main() {
@@ -88,7 +87,7 @@ fn run_encrypt_file(args: &EncryptArgs, file_args: &EncryptFileArgs) -> anyhow::
     let pub_key = get_pub_key(&args.key)?;
 
     let mut input = get_data_source(&file_args.input)?;
-    let mut output = match &file_args.output {
+    let output = match &file_args.output {
         Some(path) => get_data_sink(path)?,
         None => get_data_sink(&gen_encrypt_outpath(
             &file_args.input,
@@ -98,12 +97,11 @@ fn run_encrypt_file(args: &EncryptArgs, file_args: &EncryptFileArgs) -> anyhow::
 
     log::info!("Encrypting all data from the plaintext input stream...");
 
-    Encryptor::new(pub_key)
-        .encrypt_all(&mut input, &mut output)
-        .context("Failure while running encryptor")?;
-    output.flush()?;
+    let mut encryptor = AutoEncryptor::new(pub_key, output);
+    let num_copied = io::copy(&mut input, &mut encryptor).context("Failure running encryptor")?;
+    encryptor.finish().context("Failure finishing encryptor")?;
 
-    log::info!("Success!");
+    log::info!("Success! Copied {} bytes into encryptor.", num_copied);
     Ok(())
 }
 
@@ -115,19 +113,18 @@ fn run_decrypt(args: &DecryptArgs) -> anyhow::Result<()> {
     let sec_key = get_sec_key(&args.key)?;
 
     let mut input = get_data_source(&args.input)?;
-    let mut output = match &args.output {
+    let output = match &args.output {
         Some(path) => get_data_sink(path)?,
         None => get_data_sink(&gen_decrypt_outpath(&args.input, args.decompress.unwrap())?)?,
     };
 
     log::info!("Decrypting all data from the ciphertext input stream...");
 
-    Decryptor::new(sec_key)
-        .decrypt_all(&mut input, &mut output)
-        .context("Failure while running decryptor")?;
-    output.flush()?;
+    let mut decryptor = AutoDecryptor::new(sec_key, output);
+    let num_copied = io::copy(&mut input, &mut decryptor).context("Failure running decryptor")?;
+    decryptor.finish().context("Failure finishing decryptor")?;
 
-    log::info!("Success!");
+    log::info!("Success! Copied {} bytes into decryptor.", num_copied);
     Ok(())
 }
 

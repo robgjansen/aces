@@ -1,4 +1,4 @@
-use anyhow::{self, bail};
+use anyhow;
 use bytes::{Buf, BytesMut};
 use crypto_box::{
     aead::{Aead, AeadCore, OsRng, Payload},
@@ -7,9 +7,15 @@ use crypto_box::{
 
 use std::{
     fs::File,
-    io::{ErrorKind, Read, Write},
+    io::{self, Error, ErrorKind, Read, Write},
     path::PathBuf,
 };
+
+const PLAINTEXT_MSG_LEN: usize = 2usize.pow(16u32); // 64 KiB per payload
+const KEY_LEN: usize = 32; // Size of the public key and secret key
+const NONCE_LEN: usize = 24; // Each message has a 24 byte nonce
+const MAC_LEN: usize = 16; // Each message has a 16 byte mac
+const CIPHERTEXT_MSG_LEN: usize = PLAINTEXT_MSG_LEN + NONCE_LEN + MAC_LEN;
 
 pub fn write_public_key(key: &PublicKey, path: &PathBuf) -> anyhow::Result<()> {
     log::info!("Saving public key to {}", path.to_string_lossy());
@@ -19,7 +25,7 @@ pub fn write_public_key(key: &PublicKey, path: &PathBuf) -> anyhow::Result<()> {
 
 pub fn read_public_key(path: &PathBuf) -> anyhow::Result<PublicKey> {
     log::info!("Loading public key from {}", path.to_string_lossy());
-    let mut buf = [0; 32];
+    let mut buf = [0; KEY_LEN];
     File::open(path)?.read_exact(&mut buf)?;
     Ok(PublicKey::from(buf))
 }
@@ -32,7 +38,7 @@ pub fn write_secret_key(key: &SecretKey, path: &PathBuf) -> anyhow::Result<()> {
 
 pub fn read_secret_key(path: &PathBuf) -> anyhow::Result<SecretKey> {
     log::info!("Loading secret key from {}", path.to_string_lossy());
-    let mut buf = [0; 32];
+    let mut buf = [0; KEY_LEN];
     File::open(path)?.read_exact(&mut buf)?;
     Ok(SecretKey::from(buf))
 }
@@ -44,91 +50,47 @@ pub fn generate_and_write_key_pair(sec_path: &PathBuf, pub_path: &PathBuf) -> an
     write_public_key(&pub_key, pub_path)
 }
 
-const PLAINTEXT_MSG_LEN: usize = 2usize.pow(16u32); // 64 KiB per payload
-const CIPHERTEXT_MSG_LEN: usize = PLAINTEXT_MSG_LEN + 24 + 16; // nonce + mac
-
-pub struct Encryptor {
+/// An Encryptor reads plaintexts from the input, encrypts, and writes
+/// ciphertexts to the output.
+///
+/// This module writes out an encrypted 'package' that consists of:
+/// - The public key needed for decryption [32 bytes]
+/// - A number of encrypted messages, where each message consists of:
+///   - The nonce needed for decryption [24 bytes]
+///   - The encrypted version of the plaintext payload [64 KiB]
+///   - The message MAC [16 bytes]
+///
+/// Note that the last message written may be truncated if there was less
+/// than 64 KiB of plaintext payload available.
+pub struct AutoEncryptor<W: Write> {
     key: PublicKey,
     crypto_box: ChaChaBox,
     msg_buf: BytesMut,
+    writer: Option<W>, // so we can take() on finish()/drop()
+    wrote_header: bool,
 }
 
-impl Encryptor {
-    /// Create a new encryptor that creates a symmetric shared secret from the
-    /// given public key and a newly generated key pair.
-    pub fn new(peer_key: PublicKey) -> Self {
+impl<W: Write> AutoEncryptor<W> {
+    pub fn new(peer_key: PublicKey, writer: W) -> Self {
         let key = SecretKey::generate(&mut OsRng);
         Self {
             key: key.public_key(),
             crypto_box: ChaChaBox::new(&peer_key, &key),
             msg_buf: BytesMut::with_capacity(PLAINTEXT_MSG_LEN),
+            writer: Some(writer),
+            wrote_header: false,
         }
     }
 
-    /// Reads plaintexts from the input, encrypts, and writes ciphertexts to the output.
-    ///
-    /// This function writes out an encrypted 'package' that consists of:
-    /// - The public key needed for decryption [32 bytes]
-    /// - A number of encrypted messages, where each message consists of:
-    ///   - The nonce needed for decryption [24 bytes]
-    ///   - The encrypted version of the plaintext payload [64 KiB]
-    ///   - The message MAC [16 bytes]
-    ///
-    /// Note that the last message written may be truncated if there was less
-    /// than 64 KiB of plaintext payload available.
-    pub fn encrypt_all<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
-    where
-        R: Read,
-        W: Write,
-    {
-        self.start(output)?;
-        self.run_encrypt_loop(input, output)?;
-        self.finish(output)
-    }
-
-    /// Writes our generated public key that will be needed to decrypt the
-    /// encrypted message that we produce.
-    fn start<W>(&self, output: &mut W) -> anyhow::Result<()>
-    where
-        W: Write,
-    {
-        output.write_all(self.key.as_ref())?;
-        Ok(())
+    pub fn finish(mut self) -> io::Result<W> {
+        self.write_inner(true)?;
+        self.writer.as_mut().unwrap().flush()?;
+        Ok(self.writer.take().unwrap())
     }
 
     /// Encrypt the plaintext input and write the nonce and ciphertext to the
     /// output.
-    fn run_encrypt_loop<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
-    where
-        R: Read,
-        W: Write,
-    {
-        let mut read_buf: [u8; PLAINTEXT_MSG_LEN] = [0; PLAINTEXT_MSG_LEN];
-        loop {
-            let num_read = match input.read(&mut read_buf) {
-                Ok(n) => n,
-                Err(e) => match e.kind() {
-                    ErrorKind::Interrupted => continue,
-                    _ => bail!(e),
-                },
-            };
-
-            match num_read {
-                0 => return Ok(()),
-                _ => self.msg_buf.extend(&read_buf[..num_read]),
-            }
-
-            while self.msg_buf.len() >= PLAINTEXT_MSG_LEN {
-                let msg = self.msg_buf.split_to(PLAINTEXT_MSG_LEN);
-                self.write_encrypted_message(msg, output)?;
-            }
-        }
-    }
-
-    fn write_encrypted_message<W>(&mut self, msg: BytesMut, output: &mut W) -> anyhow::Result<()>
-    where
-        W: Write,
-    {
+    fn write_encrypted_message(&mut self, msg: BytesMut) -> io::Result<()> {
         let nonce = ChaChaBox::generate_nonce(&mut OsRng);
 
         let payload = Payload {
@@ -138,112 +100,101 @@ impl Encryptor {
 
         let ciphertext = match self.crypto_box.encrypt(&nonce, payload) {
             Ok(vec) => vec,
-            Err(e) => anyhow::bail!(e),
+            Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
         };
 
-        output.write_all(nonce.as_ref())?;
-        output.write_all(ciphertext.as_slice())?;
+        self.writer.as_mut().unwrap().write_all(nonce.as_ref())?;
+        self.writer
+            .as_mut()
+            .unwrap()
+            .write_all(ciphertext.as_slice())?;
         Ok(())
     }
 
-    fn finish<W>(&mut self, output: &mut W) -> anyhow::Result<()>
-    where
-        W: Write,
-    {
-        // If there are leftover bytes in the buffer, write a partial message now.
-        if self.msg_buf.len() > 0 {
-            let msg = self.msg_buf.split();
-            self.write_encrypted_message(msg, output)?;
+    fn write_inner(&mut self, finalize: bool) -> io::Result<()> {
+        if !self.wrote_header {
+            // Writes our generated public key that will be needed to decrypt
+            // the encrypted message that we produce.
+            self.writer.as_mut().unwrap().write_all(self.key.as_ref())?;
+            self.wrote_header = true;
         }
+
+        while self.msg_buf.len() >= PLAINTEXT_MSG_LEN {
+            let msg = self.msg_buf.split_to(PLAINTEXT_MSG_LEN);
+            self.write_encrypted_message(msg)?;
+        }
+
+        if finalize && self.msg_buf.len() > 0 {
+            // Write remaining buf without requiring a full-length message.
+            let remaining = self.msg_buf.split();
+            self.write_encrypted_message(remaining)?;
+        }
+
         Ok(())
     }
 }
 
-pub struct Decryptor {
+impl<W: Write> Drop for AutoEncryptor<W> {
+    fn drop(&mut self) {
+        // writer might be none if finish was already called.
+        if self.writer.is_some() {
+            self.write_inner(true).unwrap();
+            self.writer.as_mut().unwrap().flush().unwrap();
+        }
+    }
+}
+
+impl<W: Write> Write for AutoEncryptor<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.msg_buf.extend(buf);
+        self.write_inner(false)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.write_inner(false)?;
+        self.writer.as_mut().unwrap().flush()
+    }
+}
+
+/// A Decryptor ciphertexts from the input, decrypts, and writes plaintexts to
+/// the output. This module expects the input to contain the encrypted 'package'
+/// produced by the `Encryptor` and will extract the decryption material
+/// accordingly.
+pub struct AutoDecryptor<W: Write> {
     key: SecretKey,
     crypto_box: Option<ChaChaBox>,
     msg_buf: BytesMut,
+    writer: Option<W>, // so we can take() on finish()/drop()
+    read_header: bool,
 }
 
-impl Decryptor {
-    pub fn new(key: SecretKey) -> Self {
+impl<W: Write> AutoDecryptor<W> {
+    pub fn new(key: SecretKey, writer: W) -> Self {
         Self {
             key,
             crypto_box: None,
             msg_buf: BytesMut::with_capacity(CIPHERTEXT_MSG_LEN),
+            writer: Some(writer),
+            read_header: false,
         }
     }
 
-    /// Reads ciphertexts from the input, decrypts, and writes plaintexts to the output.
-    /// This function expects the input to contain the encrypted 'package' produced by
-    /// `Encryptor::encrypt_all` and will extract the decryption material accordingly.
-    pub fn decrypt_all<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
-    where
-        R: Read,
-        W: Write,
-    {
-        self.start(input)?;
-        self.run_decrypt_loop(input, output)?;
-        self.finish(output)
+    pub fn finish(mut self) -> io::Result<W> {
+        self.write_inner(true)?;
+        self.writer.as_mut().unwrap().flush()?;
+        Ok(self.writer.take().unwrap())
     }
 
-    fn start<R>(&mut self, input: &mut R) -> anyhow::Result<()>
-    where
-        R: Read,
-    {
-        let peer_key = {
-            let mut key_buf: [u8; 32] = [0; 32];
-            input.read_exact(&mut key_buf)?;
-            PublicKey::from(key_buf)
-        };
-
-        self.crypto_box = Some(ChaChaBox::new(&peer_key, &self.key));
-        Ok(())
-    }
-
-    fn run_decrypt_loop<R, W>(&mut self, input: &mut R, output: &mut W) -> anyhow::Result<()>
-    where
-        R: Read,
-        W: Write,
-    {
-        let mut read_buf: [u8; CIPHERTEXT_MSG_LEN] = [0; CIPHERTEXT_MSG_LEN];
-        loop {
-            let num_read = match input.read(&mut read_buf) {
-                Ok(n) => n,
-                Err(e) => match e.kind() {
-                    ErrorKind::Interrupted => continue,
-                    _ => bail!(e),
-                },
-            };
-
-            match num_read {
-                0 => return Ok(()),
-                _ => self.msg_buf.extend(&read_buf[..num_read]),
-            }
-
-            while self.msg_buf.len() >= CIPHERTEXT_MSG_LEN {
-                let msg = self.msg_buf.split_to(CIPHERTEXT_MSG_LEN);
-                self.write_decrypted_message(msg, output)?;
-            }
-        }
-    }
-
-    fn write_decrypted_message<W>(
-        &mut self,
-        mut msg: BytesMut,
-        output: &mut W,
-    ) -> anyhow::Result<()>
-    where
-        W: Write,
-    {
+    fn write_decrypted_message(&mut self, mut msg: BytesMut) -> io::Result<()> {
         let crypto_box = match &self.crypto_box {
-            Some(o) => o,
-            None => panic!("Need to call start first!"),
+            Some(cb) => cb,
+            None => return Err(Error::new(ErrorKind::Other, "Crypto box does not exist!")),
         };
 
         let nonce = {
-            let mut nonce_bytes = msg.split_to(24);
-            let mut nonce_buf: [u8; 24] = [0; 24];
+            let mut nonce_bytes = msg.split_to(NONCE_LEN);
+            let mut nonce_buf: [u8; NONCE_LEN] = [0; NONCE_LEN];
             nonce_bytes.copy_to_slice(&mut nonce_buf);
             Nonce::from(nonce_buf)
         };
@@ -255,32 +206,78 @@ impl Decryptor {
 
         let plaintext = match crypto_box.decrypt(&nonce, payload) {
             Ok(vec) => vec,
-            Err(e) => anyhow::bail!(e),
+            Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
         };
-        output.write_all(plaintext.as_ref())?;
+        self.writer
+            .as_mut()
+            .unwrap()
+            .write_all(plaintext.as_ref())?;
         Ok(())
     }
 
-    fn finish<W>(&mut self, output: &mut W) -> anyhow::Result<()>
-    where
-        W: Write,
-    {
-        // If there are leftover bytes in the buffer, write a partial message now.
-        if self.msg_buf.len() > 0 {
-            let msg = self.msg_buf.split();
-            self.write_decrypted_message(msg, output)?;
+    fn write_inner(&mut self, finalize: bool) -> io::Result<()> {
+        if !self.read_header {
+            if self.msg_buf.len() < KEY_LEN {
+                return Err(Error::from(ErrorKind::WouldBlock));
+            }
+
+            // Reads the generated public key that was used to encrypt.
+            let peer_key = {
+                let mut key_bytes = self.msg_buf.split_to(KEY_LEN);
+                let mut key_buf: [u8; KEY_LEN] = [0; KEY_LEN];
+                key_bytes.copy_to_slice(&mut key_buf);
+                PublicKey::from(key_buf)
+            };
+
+            self.crypto_box = Some(ChaChaBox::new(&peer_key, &self.key));
+            self.read_header = true;
         }
+
+        while self.msg_buf.len() >= CIPHERTEXT_MSG_LEN {
+            let msg = self.msg_buf.split_to(CIPHERTEXT_MSG_LEN);
+            self.write_decrypted_message(msg)?;
+        }
+
+        if finalize && self.msg_buf.len() >= NONCE_LEN + MAC_LEN {
+            // Write remaining buf without requiring a full-length message.
+            let remaining = self.msg_buf.split();
+            self.write_decrypted_message(remaining)?;
+        }
+
         Ok(())
+    }
+}
+
+impl<W: Write> Drop for AutoDecryptor<W> {
+    fn drop(&mut self) {
+        // writer might be none if finish was already called.
+        if self.writer.is_some() {
+            self.write_inner(true).unwrap();
+            self.writer.as_mut().unwrap().flush().unwrap();
+        }
+    }
+}
+
+impl<W: Write> Write for AutoDecryptor<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.msg_buf.extend(buf);
+        self.write_inner(false)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.write_inner(false)?;
+        self.writer.as_mut().unwrap().flush()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Cursor, Seek, SeekFrom};
+    use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
     use crypto_box::{aead::OsRng, rand_core::RngCore, SecretKey};
 
-    use super::{Decryptor, Encryptor, PLAINTEXT_MSG_LEN};
+    use super::{AutoDecryptor, AutoEncryptor, KEY_LEN, MAC_LEN, NONCE_LEN, PLAINTEXT_MSG_LEN};
 
     fn make_buffer(val: u8, len: usize) -> Cursor<Vec<u8>> {
         let mut buf: Vec<u8> = Vec::with_capacity(len);
@@ -292,44 +289,54 @@ mod tests {
         // Once per file: 32 bytes for pub_key
         // Once per msg: 24 bytes for nonce, 16 for mac
         let num_msgs = (plaintext_len + PLAINTEXT_MSG_LEN - 1) / PLAINTEXT_MSG_LEN;
-        let ciphertext_len = 32 + (24 * num_msgs) + plaintext_len + (16 * num_msgs);
+        let ciphertext_len = KEY_LEN + ((NONCE_LEN + MAC_LEN) * num_msgs) + plaintext_len;
 
         let mut plaintext = make_buffer(OsRng.next_u32() as u8, plaintext_len);
-        let mut encrypted = make_buffer(0, ciphertext_len);
-        let mut decrypted = make_buffer(0, plaintext_len);
+        let encrypted = make_buffer(0, ciphertext_len);
+        let decrypted = make_buffer(0, plaintext_len);
 
         // encrypt
         let key = SecretKey::generate(&mut OsRng);
-        let mut enc = Encryptor::new(key.public_key());
+        let mut aenc = AutoEncryptor::new(key.public_key(), encrypted);
 
         // writes the pub key
-        enc.start(&mut encrypted)?;
-        assert_eq!(encrypted.position(), 32);
+        assert_eq!(aenc.wrote_header, false);
+        aenc.write_inner(false).unwrap();
+        assert_eq!(aenc.wrote_header, true);
 
         // plaintext completely read
-        enc.run_encrypt_loop(&mut plaintext, &mut encrypted)?;
-        assert_eq!(plaintext.position() as usize, plaintext_len);
+        assert_eq!(
+            io::copy(&mut plaintext, &mut aenc).unwrap(),
+            plaintext_len as u64
+        );
 
         // ciphertext completely written
-        enc.finish(&mut encrypted)?;
+        let mut encrypted = aenc.finish().unwrap();
         assert_eq!(encrypted.position() as usize, ciphertext_len);
 
         // reset encrypted output to use as input to decryption
         encrypted.seek(SeekFrom::Start(0))?;
 
         // decrypt
-        let mut dec = Decryptor::new(key);
+        let mut adec = AutoDecryptor::new(key, decrypted);
 
         // reads the pub key
-        dec.start(&mut encrypted)?;
-        assert_eq!(encrypted.position(), 32);
+        assert_eq!(adec.read_header, false);
+        let mut partial = encrypted.take(KEY_LEN as u64);
+        assert_eq!(io::copy(&mut partial, &mut adec).unwrap(), KEY_LEN as u64);
+        assert_eq!(adec.read_header, true);
+        let mut encrypted = partial.into_inner();
+        assert_eq!(encrypted.position(), KEY_LEN as u64);
 
         // ciphertext completely read
-        dec.run_decrypt_loop(&mut encrypted, &mut decrypted)?;
+        assert_eq!(
+            io::copy(&mut encrypted, &mut adec).unwrap(),
+            (ciphertext_len - KEY_LEN) as u64
+        );
         assert_eq!(encrypted.position() as usize, ciphertext_len);
 
         // plaintext completely written
-        dec.finish(&mut decrypted)?;
+        let decrypted = adec.finish().unwrap();
         assert_eq!(decrypted.position() as usize, plaintext_len);
 
         assert_eq!(
@@ -368,5 +375,61 @@ mod tests {
     #[test]
     fn plaintext_len_n_times_two() {
         assert!(run_pipeline(PLAINTEXT_MSG_LEN * 2).is_ok())
+    }
+
+    #[test]
+    fn plaintext_len_n_times_two_plus_one() {
+        assert!(run_pipeline(PLAINTEXT_MSG_LEN * 2 + 1).is_ok())
+    }
+
+    fn run_encrypt_decrypt_chain(num_msgs: usize) {
+        let plaintext_len = num_msgs * PLAINTEXT_MSG_LEN;
+
+        // input and output with both contain plaintext
+        let mut input = make_buffer(OsRng.next_u32() as u8, plaintext_len);
+        let output = make_buffer(0, plaintext_len);
+
+        let sec_key = SecretKey::generate(&mut OsRng);
+        let pub_key = sec_key.public_key().clone();
+
+        // encryptor forwards tp decryptor forwards to output
+        let adec = AutoDecryptor::new(sec_key, output);
+        let mut aenc = AutoEncryptor::new(pub_key, adec);
+
+        // copy input through the chain
+        assert_eq!(
+            io::copy(&mut input, &mut aenc).unwrap(),
+            plaintext_len as u64
+        );
+
+        let adec = aenc.finish().unwrap();
+        let output = adec.finish().unwrap();
+
+        assert_eq!(
+            &input.into_inner().as_slice().len(),
+            &output.into_inner().as_slice().len()
+        );
+    }
+
+    #[test]
+    fn encrypt_decrypt_chain_xsmall() {
+        run_encrypt_decrypt_chain(8);
+    }
+
+    #[test]
+    fn encrypt_decrypt_chain_small() {
+        run_encrypt_decrypt_chain(128);
+    }
+
+    #[test]
+    #[ignore]
+    fn encrypt_decrypt_chain_medium() {
+        run_encrypt_decrypt_chain(1024);
+    }
+
+    #[test]
+    #[ignore]
+    fn encrypt_decrypt_chain_large() {
+        run_encrypt_decrypt_chain(5120);
     }
 }
