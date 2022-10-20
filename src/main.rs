@@ -9,6 +9,7 @@ use chrono::Utc;
 use crypto_box::{PublicKey, SecretKey};
 use env_logger::{Builder, Target};
 use log::LevelFilter;
+use zstd::stream::write::{Decoder, Encoder};
 
 mod args;
 mod crypto;
@@ -97,13 +98,26 @@ fn run_encrypt_file(args: &EncryptArgs, file_args: &EncryptFileArgs) -> anyhow::
         )?)?,
     };
 
-    log::info!("Encrypting all data from the plaintext input stream...");
-
     let mut encryptor = AutoEncryptor::new(pub_key, output);
-    let num_copied = io::copy(&mut input, &mut encryptor).context("Failure running encryptor")?;
+
+    let num_copied = if args.compress.unwrap() {
+        log::info!("Compressing->Encrypting all data from the plaintext input stream...");
+
+        let mut encoder =
+            Encoder::new(encryptor, 0).context("Failure initializing zstd encoder")?;
+        let num_copied = io::copy(&mut input, &mut encoder)
+            .context("Failure running encoder->encryptor chain")?;
+        encryptor = encoder.finish().context("Failure finishing encoder")?;
+
+        num_copied
+    } else {
+        log::info!("Encrypting all data from the plaintext input stream...");
+        io::copy(&mut input, &mut encryptor).context("Failure running encryptor")?
+    };
+
     encryptor.finish().context("Failure finishing encryptor")?;
 
-    log::info!("Success! Copied {} bytes into encryptor.", num_copied);
+    log::info!("Success! Processed {} bytes from input stream.", num_copied);
     Ok(())
 }
 
@@ -120,13 +134,31 @@ fn run_decrypt(args: &DecryptArgs) -> anyhow::Result<()> {
         None => get_data_sink(&gen_decrypt_outpath(&args.input, args.decompress.unwrap())?)?,
     };
 
-    log::info!("Decrypting all data from the ciphertext input stream...");
+    let num_copied = if args.decompress.unwrap() {
+        log::info!("Decrypting->Decompressing all data from the ciphertext input stream...");
 
-    let mut decryptor = AutoDecryptor::new(sec_key, output);
-    let num_copied = io::copy(&mut input, &mut decryptor).context("Failure running decryptor")?;
-    decryptor.finish().context("Failure finishing decryptor")?;
+        let mut decoder = Decoder::new(output).context("Failure initializing zstd decoder")?;
+        let mut decryptor = AutoDecryptor::new(sec_key, decoder);
 
-    log::info!("Success! Copied {} bytes into decryptor.", num_copied);
+        let num_copied = io::copy(&mut input, &mut decryptor)
+            .context("Failure running decryptor->decoder chain")?;
+
+        decoder = decryptor.finish().context("Failure finishing decryptor")?;
+        decoder.flush().context("Failure finishing decoder")?;
+
+        num_copied
+    } else {
+        log::info!("Decrypting all data from the ciphertext input stream...");
+
+        let mut decryptor = AutoDecryptor::new(sec_key, output);
+        let num_copied =
+            io::copy(&mut input, &mut decryptor).context("Failure running decryptor")?;
+        decryptor.finish().context("Failure finishing decryptor")?;
+
+        num_copied
+    };
+
+    log::info!("Success! Processed {} bytes from input stream.", num_copied);
     Ok(())
 }
 
@@ -185,9 +217,15 @@ fn gen_encrypt_outpath(input: &PathBuf, compress: bool) -> anyhow::Result<PathBu
     let mut out = gen_base_outpath(input);
 
     if compress {
-        out = out.with_extension(".zst");
+        out.set_file_name(format!(
+            "{}.zst",
+            out.file_name().unwrap().to_string_lossy()
+        ));
     }
-    out = out.with_extension(".ace");
+    out.set_file_name(format!(
+        "{}.ace",
+        out.file_name().unwrap().to_string_lossy()
+    ));
 
     if out.exists() {
         anyhow::bail!(
