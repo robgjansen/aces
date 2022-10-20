@@ -1,6 +1,3 @@
-mod args;
-mod crypto;
-
 use std::{
     fs::File,
     io::{self, Read, Write},
@@ -8,14 +5,19 @@ use std::{
 };
 
 use anyhow::Context;
-use args::{EncryptFileArgs, EncryptTorArgs};
 use chrono::Utc;
 use crypto_box::{PublicKey, SecretKey};
 use env_logger::{Builder, Target};
 use log::LevelFilter;
 
+mod args;
+mod crypto;
+
 use crate::{
-    args::{Commands, DecryptArgs, EncryptArgs, EncryptInputs, GenKeyArgs, LogLevel},
+    args::{
+        Commands, DecryptArgs, EncryptArgs, EncryptFileArgs, EncryptInputs, EncryptTorArgs,
+        GenKeyArgs, LogLevel,
+    },
     crypto::{AutoDecryptor, AutoEncryptor},
 };
 
