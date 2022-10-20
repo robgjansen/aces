@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
-bytes = "1.2.0"
 chrono = "0.4"
 clap = { version = "4.0.10", features = ["derive"] }
 crypto_box = "0.8.1"

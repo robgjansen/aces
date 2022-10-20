@@ -1,5 +1,4 @@
 use anyhow;
-use bytes::{Buf, BytesMut};
 use crypto_box::{
     aead::{Aead, AeadCore, OsRng, Payload},
     ChaChaBox, Nonce, PublicKey, SecretKey,
@@ -65,7 +64,7 @@ pub fn generate_and_write_key_pair(sec_path: &PathBuf, pub_path: &PathBuf) -> an
 pub struct AutoEncryptor<W: Write> {
     key: PublicKey,
     crypto_box: ChaChaBox,
-    msg_buf: BytesMut,
+    msg_buf2: Vec<u8>,
     writer: Option<W>, // so we can take() on finish()/drop()
     wrote_header: bool,
 }
@@ -76,7 +75,7 @@ impl<W: Write> AutoEncryptor<W> {
         Self {
             key: key.public_key(),
             crypto_box: ChaChaBox::new(&peer_key, &key),
-            msg_buf: BytesMut::with_capacity(PLAINTEXT_MSG_LEN),
+            msg_buf2: Vec::with_capacity(PLAINTEXT_MSG_LEN),
             writer: Some(writer),
             wrote_header: false,
         }
@@ -90,7 +89,7 @@ impl<W: Write> AutoEncryptor<W> {
 
     /// Encrypt the plaintext input and write the nonce and ciphertext to the
     /// output.
-    fn write_encrypted_message(&mut self, msg: BytesMut) -> io::Result<()> {
+    fn write_encrypted_message(&mut self, msg: &[u8]) -> io::Result<()> {
         let nonce = ChaChaBox::generate_nonce(&mut OsRng);
 
         let payload = Payload {
@@ -119,15 +118,15 @@ impl<W: Write> AutoEncryptor<W> {
             self.wrote_header = true;
         }
 
-        while self.msg_buf.len() >= PLAINTEXT_MSG_LEN {
-            let msg = self.msg_buf.split_to(PLAINTEXT_MSG_LEN);
-            self.write_encrypted_message(msg)?;
+        while self.msg_buf2.len() >= PLAINTEXT_MSG_LEN {
+            let msg: Vec<u8> = self.msg_buf2.drain(0..PLAINTEXT_MSG_LEN).collect();
+            self.write_encrypted_message(msg.as_slice())?;
         }
 
-        if finalize && self.msg_buf.len() > 0 {
+        if finalize && self.msg_buf2.len() > 0 {
             // Write remaining buf without requiring a full-length message.
-            let remaining = self.msg_buf.split();
-            self.write_encrypted_message(remaining)?;
+            let remaining: Vec<u8> = self.msg_buf2.drain(..).collect();
+            self.write_encrypted_message(remaining.as_slice())?;
         }
 
         Ok(())
@@ -146,7 +145,7 @@ impl<W: Write> Drop for AutoEncryptor<W> {
 
 impl<W: Write> Write for AutoEncryptor<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.msg_buf.extend(buf);
+        self.msg_buf2.extend_from_slice(buf);
         self.write_inner(false)?;
         Ok(buf.len())
     }
@@ -164,7 +163,7 @@ impl<W: Write> Write for AutoEncryptor<W> {
 pub struct AutoDecryptor<W: Write> {
     key: SecretKey,
     crypto_box: Option<ChaChaBox>,
-    msg_buf: BytesMut,
+    msg_buf: Vec<u8>,
     writer: Option<W>, // so we can take() on finish()/drop()
     read_header: bool,
 }
@@ -174,7 +173,7 @@ impl<W: Write> AutoDecryptor<W> {
         Self {
             key,
             crypto_box: None,
-            msg_buf: BytesMut::with_capacity(CIPHERTEXT_MSG_LEN),
+            msg_buf: Vec::with_capacity(CIPHERTEXT_MSG_LEN),
             writer: Some(writer),
             read_header: false,
         }
@@ -186,21 +185,20 @@ impl<W: Write> AutoDecryptor<W> {
         Ok(self.writer.take().unwrap())
     }
 
-    fn write_decrypted_message(&mut self, mut msg: BytesMut) -> io::Result<()> {
+    fn write_decrypted_message(&mut self, msg: &[u8]) -> io::Result<()> {
         let crypto_box = match &self.crypto_box {
             Some(cb) => cb,
             None => return Err(Error::new(ErrorKind::Other, "Crypto box does not exist!")),
         };
 
         let nonce = {
-            let mut nonce_bytes = msg.split_to(NONCE_LEN);
             let mut nonce_buf: [u8; NONCE_LEN] = [0; NONCE_LEN];
-            nonce_bytes.copy_to_slice(&mut nonce_buf);
+            nonce_buf.copy_from_slice(&msg[0..NONCE_LEN]);
             Nonce::from(nonce_buf)
         };
 
         let payload = Payload {
-            msg: msg.as_ref(),
+            msg: msg[NONCE_LEN..].as_ref(),
             aad: nonce.as_ref(),
         };
 
@@ -223,9 +221,9 @@ impl<W: Write> AutoDecryptor<W> {
 
             // Reads the generated public key that was used to encrypt.
             let peer_key = {
-                let mut key_bytes = self.msg_buf.split_to(KEY_LEN);
+                let key_bytes: Vec<u8> = self.msg_buf.drain(0..KEY_LEN).collect();
                 let mut key_buf: [u8; KEY_LEN] = [0; KEY_LEN];
-                key_bytes.copy_to_slice(&mut key_buf);
+                key_buf.copy_from_slice(&key_bytes.as_slice());
                 PublicKey::from(key_buf)
             };
 
@@ -234,14 +232,14 @@ impl<W: Write> AutoDecryptor<W> {
         }
 
         while self.msg_buf.len() >= CIPHERTEXT_MSG_LEN {
-            let msg = self.msg_buf.split_to(CIPHERTEXT_MSG_LEN);
-            self.write_decrypted_message(msg)?;
+            let msg: Vec<u8> = self.msg_buf.drain(0..CIPHERTEXT_MSG_LEN).collect();
+            self.write_decrypted_message(msg.as_slice())?;
         }
 
         if finalize && self.msg_buf.len() >= NONCE_LEN + MAC_LEN {
             // Write remaining buf without requiring a full-length message.
-            let remaining = self.msg_buf.split();
-            self.write_decrypted_message(remaining)?;
+            let remaining: Vec<u8> = self.msg_buf.drain(..).collect();
+            self.write_decrypted_message(remaining.as_slice())?;
         }
 
         Ok(())
@@ -260,7 +258,7 @@ impl<W: Write> Drop for AutoDecryptor<W> {
 
 impl<W: Write> Write for AutoDecryptor<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.msg_buf.extend(buf);
+        self.msg_buf.extend_from_slice(buf);
         self.write_inner(false)?;
         Ok(buf.len())
     }
