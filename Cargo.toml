@@ -11,5 +11,6 @@ chrono = "0.4"
 clap = { version = "4.0.10", features = ["derive"] }
 crypto_box = "0.8.1"
 env_logger = "0.9.0"
+humantime = "2.1.0"
 log = "0.4.0"
 zstd = "0.11.2"

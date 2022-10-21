@@ -26,11 +26,10 @@ fn main() {
     let cli = args::parse_cli();
 
     let level = match &cli.log_level {
-        Some(LogLevel::Info) => LevelFilter::Info,
-        Some(LogLevel::Warn) => LevelFilter::Warn,
-        Some(LogLevel::Error) => LevelFilter::Error,
-        Some(LogLevel::Off) => LevelFilter::Off,
-        None => LevelFilter::Info,
+        LogLevel::Info => LevelFilter::Info,
+        LogLevel::Warn => LevelFilter::Warn,
+        LogLevel::Error => LevelFilter::Error,
+        LogLevel::Off => LevelFilter::Off,
     };
 
     Builder::new()
@@ -61,15 +60,30 @@ fn main() {
     log::info!("Returning cleanly from main");
 }
 
-fn run_genkey(_args: &GenKeyArgs) -> anyhow::Result<()> {
+fn run_genkey(args: &GenKeyArgs) -> anyhow::Result<()> {
     log::info!("Generating key pair");
 
-    crypto::generate_and_write_key_pair(
-        &PathBuf::from("./aces.sec.key"),
-        &PathBuf::from("./aces.pub.key"),
-    )?;
+    if args.secret.exists() {
+        anyhow::bail!(
+            "Refusing to overwrite existing file with secret key: {}. Specify with -s.",
+            args.secret.to_string_lossy()
+        );
+    }
 
-    log::info!("Keys written! Use aces.pub.key to encrypt and aces.sec.key to decrypt.");
+    if args.public.exists() {
+        anyhow::bail!(
+            "Refusing to overwrite existing file with public key: {}. Specify with -p.",
+            args.public.to_string_lossy()
+        );
+    }
+
+    crypto::generate_and_write_key_pair(&args.secret, &args.public)?;
+
+    log::info!(
+        "Keys written! Use {} to encrypt and {} to decrypt.",
+        args.public.to_string_lossy(),
+        args.secret.to_string_lossy()
+    );
     Ok(())
 }
 
@@ -101,12 +115,12 @@ fn run_encrypt_file(args: &EncryptArgs, file_args: &EncryptFileArgs) -> anyhow::
     let mut encryptor = AutoEncryptor::new(pub_key, output);
 
     let num_copied = if args.compress.unwrap() {
-        log::info!("Compressing->Encrypting all data from the plaintext input stream...");
+        log::info!("Compressing-->Encrypting all data from the plaintext input stream...");
 
         let mut encoder =
             Encoder::new(encryptor, 0).context("Failure initializing zstd encoder")?;
         let num_copied = io::copy(&mut input, &mut encoder)
-            .context("Failure running encoder->encryptor chain")?;
+            .context("Failure running encoder-->encryptor chain")?;
         encryptor = encoder.finish().context("Failure finishing encoder")?;
 
         num_copied
@@ -121,7 +135,9 @@ fn run_encrypt_file(args: &EncryptArgs, file_args: &EncryptFileArgs) -> anyhow::
     Ok(())
 }
 
-fn run_encrypt_tor(_args: &EncryptArgs, _tor_args: &EncryptTorArgs) -> anyhow::Result<()> {
+fn run_encrypt_tor(_args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow::Result<()> {
+    log::info!("{:?}", tor_args.event);
+    log::info!("{:?}", tor_args.rotate);
     todo!()
 }
 
@@ -135,13 +151,13 @@ fn run_decrypt(args: &DecryptArgs) -> anyhow::Result<()> {
     };
 
     let num_copied = if args.decompress.unwrap() {
-        log::info!("Decrypting->Decompressing all data from the ciphertext input stream...");
+        log::info!("Decrypting-->Decompressing all data from the ciphertext input stream...");
 
         let mut decoder = Decoder::new(output).context("Failure initializing zstd decoder")?;
         let mut decryptor = AutoDecryptor::new(sec_key, decoder);
 
         let num_copied = io::copy(&mut input, &mut decryptor)
-            .context("Failure running decryptor->decoder chain")?;
+            .context("Failure running decryptor-->decoder chain")?;
 
         decoder = decryptor.finish().context("Failure finishing decryptor")?;
         decoder.flush().context("Failure finishing decoder")?;
