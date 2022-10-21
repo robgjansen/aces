@@ -1,6 +1,4 @@
-use std::{
-    io::{self, Write},
-};
+use std::io::{self, Write};
 
 use anyhow::Context;
 use env_logger::{Builder, Target};
@@ -144,7 +142,10 @@ fn run_decrypt(args: &DecryptArgs) -> anyhow::Result<()> {
     let mut input = util::get_data_source(&args.input)?;
     let output = match &args.output {
         Some(path) => util::get_data_sink(path)?,
-        None => util::get_data_sink(&util::gen_decrypt_outpath(&args.input, args.decompress.unwrap())?)?,
+        None => util::get_data_sink(&util::gen_decrypt_outpath(
+            &args.input,
+            args.decompress.unwrap(),
+        )?)?,
     };
 
     let num_copied = if args.decompress.unwrap() {
