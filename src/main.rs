@@ -1,18 +1,15 @@
 use std::{
-    fs::File,
-    io::{self, Read, Write},
-    path::PathBuf,
+    io::{self, Write},
 };
 
 use anyhow::Context;
-use chrono::Utc;
-use crypto_box::{PublicKey, SecretKey};
 use env_logger::{Builder, Target};
 use log::LevelFilter;
 use zstd::stream::write::{Decoder, Encoder};
 
 mod args;
 mod crypto;
+mod util;
 
 use crate::{
     args::{
@@ -101,12 +98,12 @@ fn run_encrypt(args: &EncryptArgs) -> anyhow::Result<()> {
 }
 
 fn run_encrypt_file(args: &EncryptArgs, file_args: &EncryptFileArgs) -> anyhow::Result<()> {
-    let pub_key = get_pub_key(&args.key)?;
+    let pub_key = util::get_pub_key(&args.key)?;
 
-    let mut input = get_data_source(&file_args.input)?;
+    let mut input = util::get_data_source(&file_args.input)?;
     let output = match &file_args.output {
-        Some(path) => get_data_sink(path)?,
-        None => get_data_sink(&gen_encrypt_outpath(
+        Some(path) => util::get_data_sink(path)?,
+        None => util::get_data_sink(&util::gen_encrypt_outpath(
             &file_args.input,
             args.compress.unwrap(),
         )?)?,
@@ -142,12 +139,12 @@ fn run_encrypt_tor(_args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow::Re
 }
 
 fn run_decrypt(args: &DecryptArgs) -> anyhow::Result<()> {
-    let sec_key = get_sec_key(&args.key)?;
+    let sec_key = util::get_sec_key(&args.key)?;
 
-    let mut input = get_data_source(&args.input)?;
+    let mut input = util::get_data_source(&args.input)?;
     let output = match &args.output {
-        Some(path) => get_data_sink(path)?,
-        None => get_data_sink(&gen_decrypt_outpath(&args.input, args.decompress.unwrap())?)?,
+        Some(path) => util::get_data_sink(path)?,
+        None => util::get_data_sink(&util::gen_decrypt_outpath(&args.input, args.decompress.unwrap())?)?,
     };
 
     let num_copied = if args.decompress.unwrap() {
@@ -176,101 +173,4 @@ fn run_decrypt(args: &DecryptArgs) -> anyhow::Result<()> {
 
     log::info!("Success! Processed {} bytes from input stream.", num_copied);
     Ok(())
-}
-
-fn get_pub_key(key: &PathBuf) -> anyhow::Result<PublicKey> {
-    Ok(crypto::read_public_key(key).context(std::format!(
-        "Failed to read public key {}",
-        key.to_string_lossy()
-    ))?)
-}
-
-fn get_sec_key(key: &PathBuf) -> anyhow::Result<SecretKey> {
-    Ok(crypto::read_secret_key(key).context(std::format!(
-        "Failed to read secret key {}",
-        key.to_string_lossy()
-    ))?)
-}
-
-fn get_data_source(path: &PathBuf) -> anyhow::Result<Box<dyn Read>> {
-    if path.as_os_str().eq("-") {
-        log::info!("Using stdin reader");
-        Ok(Box::new(std::io::stdin()))
-    } else {
-        log::info!("Using file reader: {}", path.to_string_lossy());
-        let file = File::open(path).context(std::format!(
-            "Failed to open input file {}",
-            path.to_string_lossy()
-        ))?;
-        Ok(Box::new(file))
-    }
-}
-
-fn get_data_sink(path: &PathBuf) -> anyhow::Result<Box<dyn Write>> {
-    if path.as_os_str().eq("-") {
-        log::info!("Using stdout writer");
-        Ok(Box::new(std::io::stdout()))
-    } else {
-        log::info!("Using file writer: {}", path.to_string_lossy());
-        let file = File::create(path).context(std::format!(
-            "Failed to create output file {}",
-            path.to_string_lossy()
-        ))?;
-        Ok(Box::new(file))
-    }
-}
-
-fn gen_base_outpath(input: &PathBuf) -> PathBuf {
-    if input.as_os_str().eq("-") {
-        let current_ts = Utc::now().format("%Y-%m-%d_%H:%M:%S_UTC");
-        PathBuf::from(format!("./data_stream_{}", current_ts))
-    } else {
-        input.clone()
-    }
-}
-
-fn gen_encrypt_outpath(input: &PathBuf, compress: bool) -> anyhow::Result<PathBuf> {
-    let mut out = gen_base_outpath(input);
-
-    if compress {
-        out.set_file_name(format!(
-            "{}.zst",
-            out.file_name().unwrap().to_string_lossy()
-        ));
-    }
-    out.set_file_name(format!(
-        "{}.ace",
-        out.file_name().unwrap().to_string_lossy()
-    ));
-
-    if out.exists() {
-        anyhow::bail!(
-            "Refusing to write encrypted output to existing file: {}. Specify with -o.",
-            out.to_string_lossy()
-        );
-    }
-    Ok(out)
-}
-
-fn gen_decrypt_outpath(input: &PathBuf, decompress: bool) -> anyhow::Result<PathBuf> {
-    let mut out = gen_base_outpath(input);
-
-    if let Some(ext) = out.extension() {
-        if ext.eq("ace") {
-            out.set_extension("");
-        }
-    }
-    if let Some(ext) = out.extension() {
-        if decompress && ext.eq("zst") {
-            out.set_extension("");
-        }
-    }
-
-    if out.exists() {
-        anyhow::bail!(
-            "Refusing to write decrypted output to existing file: {}. Specify with -o.",
-            out.to_string_lossy()
-        );
-    }
-    Ok(out)
 }
