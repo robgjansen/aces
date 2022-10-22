@@ -8,7 +8,7 @@ use std::{
         Arc,
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use anyhow::Context;
@@ -23,9 +23,10 @@ pub fn run_encrypt_tor(_args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow
         );
     }
 
-    // Install signal handler to track that we received SIGINT.
+    // Install signal handler to track when we receiv SIGINT.
     let got_sigint = set_sigint_handler()?;
 
+    // Start the IO threads to get lines from Tor and pass into channel.
     let (producers, receiver) = {
         let events = tor_args.event.join(" ");
         let (sender, receiver) = mpsc::channel();
@@ -44,23 +45,31 @@ pub fn run_encrypt_tor(_args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow
         (producers, receiver)
     };
 
-    let runtime = match tor_args.rotate {
-        Some(rotate_interval) => rotate_interval.into(),
-        None => Duration::from_secs(3600 * 24 * 365 * 10),
-    };
-
+    // Loop once for every rotation interval.
     loop {
+        if got_sigint.load(Ordering::Relaxed) {
+            log::info!("Breaking consumer loop.");
+            break;
+        }
+
+        let rotate_at = tor_args
+            .rotate
+            .and_then(|rotate| Instant::now().checked_add(rotate.into()));
+
         // TODO make a new encryptor/encoder chain here
         // and pass it as the Write output for the consumer
 
-        if let Err(e) = run_consumer(&receiver, &mut std::io::stdout(), runtime, &got_sigint) {
+        if let Err(e) = run_consumer(&receiver, &mut std::io::stdout(), &rotate_at, &got_sigint) {
             log::error!("Encountered IO error running consumer: {}", e);
             break;
         }
     }
 
     // Cleanup. Drop the receiver to close the channel and stop the producers.
+    log::info!("Dropping receiver channel.");
     drop(receiver);
+
+    log::info!("Joining producer threads.");
     for handle in producers {
         if let Err(_) = handle.join() {
             log::error!("Encountered error joining producer thread");
@@ -92,36 +101,53 @@ fn set_sigint_handler() -> anyhow::Result<Arc<AtomicBool>> {
 fn run_consumer<W: Write>(
     receiver: &Receiver<String>,
     output: &mut W,
-    runtime: Duration,
+    stop_at: &Option<Instant>,
     got_sigint: &Arc<AtomicBool>,
 ) -> io::Result<()> {
-    let deadline = Instant::now()
-        .checked_add(runtime)
-        .expect("Runtime should not overflow Instant");
-
     loop {
-        let now = Instant::now();
-        let timeout = deadline.saturating_duration_since(now);
-
-        if timeout.is_zero() {
-            return Ok(());
-        }
-
         if got_sigint.load(Ordering::Relaxed) {
+            log::info!("Consumer interrupted.");
             return Ok(());
         }
 
-        // Consume next line from channel
-        match receiver.recv_timeout(timeout) {
-            Ok(line) => output.write_all(line.as_ref())?,
-            Err(e) => match e {
-                RecvTimeoutError::Disconnected => {
-                    log::warn!("Channel is disconnected for receiver.");
-                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+        // Consume next line from channel.
+        let line = match stop_at {
+            Some(deadline) => {
+                // Block with a timeout so we can rotate file.
+                let timeout = deadline.saturating_duration_since(Instant::now());
+
+                if timeout.is_zero() {
+                    log::info!("Consumer rotation timeout occurred.");
+                    return Ok(());
                 }
-                RecvTimeoutError::Timeout => return Ok(()),
-            },
-        }
+
+                match receiver.recv_timeout(timeout) {
+                    Ok(line) => line,
+                    Err(e) => match e {
+                        RecvTimeoutError::Disconnected => {
+                            log::warn!("Channel is disconnected for receiver.");
+                            return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                        }
+                        RecvTimeoutError::Timeout => {
+                            log::info!("Consumer rotation timeout occurred.");
+                            return Ok(());
+                        }
+                    },
+                }
+            }
+            None => {
+                // Block indefinately until we have input.
+                match receiver.recv() {
+                    Ok(line) => line,
+                    Err(_) => {
+                        log::warn!("Channel is disconnected for receiver.");
+                        return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                    }
+                }
+            }
+        };
+
+        output.write_all(line.as_ref())?;
     }
 }
 
@@ -154,20 +180,35 @@ fn run_producer(
 
     loop {
         if got_sigint.load(Ordering::Relaxed) {
+            log::info!("Producer {:?} interrupted.", thread::current().id());
             return Ok(());
         }
 
         let mut line = String::new();
 
-        let bytes_read = reader.read_line(&mut line)?;
+        let bytes_read = match reader.read_line(&mut line) {
+            Ok(count) => count,
+            Err(e) => {
+                log::info!(
+                    "Producer {:?} received IO error {}.",
+                    thread::current().id(),
+                    e
+                );
+                return Err(e);
+            }
+        };
+
         if bytes_read == 0 {
-            // EOF
+            log::info!("Producer {:?} received EOF.", thread::current().id());
             return Ok(());
         }
 
         if line.starts_with("650 ") {
             if let Err(_) = sender.send(line) {
-                // Channel disconnected, so we're done
+                log::info!(
+                    "Producer {:?} channel was disconnected.",
+                    thread::current().id()
+                );
                 return Ok(());
             }
         }
