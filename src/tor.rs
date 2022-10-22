@@ -32,14 +32,21 @@ pub fn run_encrypt_tor(_args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow
         let producers = tor_args
             .socket
             .iter()
-            .map(|path| spawn_a_producer(path.clone(), events.clone(), sender.clone()))
+            .map(|path| {
+                spawn_a_producer(
+                    path.clone(),
+                    events.clone(),
+                    sender.clone(),
+                    got_sigint.clone(),
+                )
+            })
             .collect::<Vec<_>>();
         (producers, receiver)
     };
 
     let runtime = match tor_args.rotate {
         Some(rotate_interval) => rotate_interval.into(),
-        None => Duration::MAX,
+        None => Duration::from_secs(3600 * 24 * 365 * 10),
     };
 
     loop {
@@ -68,12 +75,12 @@ fn set_sigint_handler() -> anyhow::Result<Arc<AtomicBool>> {
     let is_ctrlc = got_sigint.clone();
 
     ctrlc::set_handler(move || {
-        log::info!("Received SIGINT (ctrl-c interrupt). Shutting down gracefully...");
-
         if is_ctrlc.load(Ordering::Relaxed) {
             // User is persistent, wants to close NOW
+            log::info!("Received SIGINT. Exiting NOW...");
             std::process::exit(1);
         } else {
+            log::info!("Received SIGINT. Shutting down gracefully...");
             is_ctrlc.store(true, Ordering::Relaxed);
         }
     })
@@ -88,7 +95,10 @@ fn run_consumer<W: Write>(
     runtime: Duration,
     got_sigint: &Arc<AtomicBool>,
 ) -> io::Result<()> {
-    let deadline = Instant::now() + runtime;
+    let deadline = Instant::now()
+        .checked_add(runtime)
+        .expect("Runtime should not overflow Instant");
+
     loop {
         let now = Instant::now();
         let timeout = deadline.saturating_duration_since(now);
@@ -121,13 +131,19 @@ fn spawn_a_producer(
     socket_path: PathBuf,
     events: String,
     sender: Sender<String>,
+    got_sigint: Arc<AtomicBool>,
 ) -> JoinHandle<io::Result<()>> {
-    thread::spawn(move || run_producer(socket_path, events, sender))
+    thread::spawn(move || run_producer(socket_path, events, sender, got_sigint))
 }
 
 /// A Tor control client that connects to a Tor control UNIX socket file,
 /// receives Tor control events, and sends them using the given sender channel.
-fn run_producer(socket_file: PathBuf, events: String, sender: Sender<String>) -> io::Result<()> {
+fn run_producer(
+    socket_file: PathBuf,
+    events: String,
+    sender: Sender<String>,
+    got_sigint: Arc<AtomicBool>,
+) -> io::Result<()> {
     let mut stream = UnixStream::connect(socket_file)?;
 
     let cmds = std::format!("AUTHENTICATE\nSETEVENTS {}\n", events);
@@ -137,6 +153,10 @@ fn run_producer(socket_file: PathBuf, events: String, sender: Sender<String>) ->
     let mut reader = BufReader::with_capacity(READ_BUF_SIZE, &stream);
 
     loop {
+        if got_sigint.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         let mut line = String::new();
 
         let bytes_read = reader.read_line(&mut line)?;
