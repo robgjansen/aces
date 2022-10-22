@@ -13,10 +13,15 @@ use std::{
 
 use anyhow::Context;
 use ctrlc;
+use zstd::stream::write::Encoder;
 
-use crate::args::{EncryptArgs, EncryptTorArgs};
+use crate::{
+    args::{EncryptArgs, EncryptTorArgs},
+    crypto::AutoEncryptor,
+    util,
+};
 
-pub fn run_encrypt_tor(_args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow::Result<()> {
+pub fn run_encrypt_tor(args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow::Result<()> {
     if tor_args.output.is_some() && tor_args.rotate.is_some() {
         anyhow::bail!(
             "You can't specify both an output path and file rotation. To use rotation, use the default auto-generated output path.",
@@ -52,14 +57,7 @@ pub fn run_encrypt_tor(_args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow
             break;
         }
 
-        let rotate_at = tor_args
-            .rotate
-            .and_then(|rotate| Instant::now().checked_add(rotate.into()));
-
-        // TODO make a new encryptor/encoder chain here
-        // and pass it as the Write output for the consumer
-
-        if let Err(e) = run_consumer(&receiver, &mut std::io::stdout(), &rotate_at, &got_sigint) {
+        if let Err(e) = run_encrypt_chain(args, tor_args, &receiver, &got_sigint) {
             log::error!("Encountered IO error running consumer: {}", e);
             break;
         }
@@ -76,6 +74,52 @@ pub fn run_encrypt_tor(_args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow
         }
     }
 
+    Ok(())
+}
+
+fn run_encrypt_chain(
+    args: &EncryptArgs,
+    tor_args: &EncryptTorArgs,
+    receiver: &Receiver<String>,
+    got_sigint: &Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    let output = match &tor_args.output {
+        Some(path) => util::get_data_sink(path)?,
+        None => util::get_data_sink(&util::gen_encrypt_outpath(
+            &PathBuf::from("-"), // filename will be generated
+            args.compress.unwrap(),
+        )?)?,
+    };
+
+    let stop_at = tor_args
+        .rotate
+        .and_then(|rotate| Instant::now().checked_add(rotate.into()));
+
+    let pub_key = util::get_pub_key(&args.key)?;
+
+    let mut encryptor = AutoEncryptor::new(pub_key, output);
+
+    let num_copied = if args.compress.unwrap() {
+        log::info!("Tor-->Compressing-->Encrypting data stream...");
+
+        let mut encoder =
+            Encoder::new(encryptor, 0).context("Failure initializing zstd encoder")?;
+
+        let num_copied = run_consumer(&receiver, &mut encoder, &stop_at, &got_sigint)
+            .context("Failure running encoder-->encryptor chain")?;
+
+        encryptor = encoder.finish().context("Failure finishing encoder")?;
+
+        num_copied
+    } else {
+        log::info!("Tor-->Encrypting data stream...");
+        run_consumer(&receiver, &mut encryptor, &stop_at, &got_sigint)
+            .context("Failure running encryptor")?
+    };
+
+    encryptor.finish().context("Failure finishing encryptor")?;
+
+    log::info!("Success! Processed {} bytes from input stream.", num_copied);
     Ok(())
 }
 
@@ -103,11 +147,13 @@ fn run_consumer<W: Write>(
     output: &mut W,
     stop_at: &Option<Instant>,
     got_sigint: &Arc<AtomicBool>,
-) -> io::Result<()> {
+) -> io::Result<usize> {
+    let mut total_bytes: usize = 0;
+
     loop {
         if got_sigint.load(Ordering::Relaxed) {
             log::info!("Consumer interrupted.");
-            return Ok(());
+            return Ok(total_bytes);
         }
 
         // Consume next line from channel.
@@ -118,7 +164,7 @@ fn run_consumer<W: Write>(
 
                 if timeout.is_zero() {
                     log::info!("Consumer rotation timeout occurred.");
-                    return Ok(());
+                    return Ok(total_bytes);
                 }
 
                 match receiver.recv_timeout(timeout) {
@@ -130,7 +176,7 @@ fn run_consumer<W: Write>(
                         }
                         RecvTimeoutError::Timeout => {
                             log::info!("Consumer rotation timeout occurred.");
-                            return Ok(());
+                            return Ok(total_bytes);
                         }
                     },
                 }
@@ -148,6 +194,7 @@ fn run_consumer<W: Write>(
         };
 
         output.write_all(line.as_ref())?;
+        total_bytes += line.len();
     }
 }
 

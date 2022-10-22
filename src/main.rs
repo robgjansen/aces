@@ -110,7 +110,7 @@ fn run_encrypt_file(args: &EncryptArgs, file_args: &EncryptFileArgs) -> anyhow::
     let mut encryptor = AutoEncryptor::new(pub_key, output);
 
     let num_copied = if args.compress.unwrap() {
-        log::info!("Compressing-->Encrypting all data from the plaintext input stream...");
+        log::info!("Input-->Compressing-->Encrypting data stream...");
 
         let mut encoder =
             Encoder::new(encryptor, 0).context("Failure initializing zstd encoder")?;
@@ -120,7 +120,7 @@ fn run_encrypt_file(args: &EncryptArgs, file_args: &EncryptFileArgs) -> anyhow::
 
         num_copied
     } else {
-        log::info!("Encrypting all data from the plaintext input stream...");
+        log::info!("Input-->Encrypting data stream...");
         io::copy(&mut input, &mut encryptor).context("Failure running encryptor")?
     };
 
@@ -143,7 +143,7 @@ fn run_decrypt(args: &DecryptArgs) -> anyhow::Result<()> {
     };
 
     let num_copied = if args.decompress.unwrap() {
-        log::info!("Decrypting-->Decompressing all data from the ciphertext input stream...");
+        log::info!("Input-->Decrypting-->Decompressing data stream...");
 
         let mut decoder = Decoder::new(output).context("Failure initializing zstd decoder")?;
         let mut decryptor = AutoDecryptor::new(sec_key, decoder);
@@ -156,7 +156,7 @@ fn run_decrypt(args: &DecryptArgs) -> anyhow::Result<()> {
 
         num_copied
     } else {
-        log::info!("Decrypting all data from the ciphertext input stream...");
+        log::info!("Input-->Decrypting data stream...");
 
         let mut decryptor = AutoDecryptor::new(sec_key, output);
         let num_copied =
