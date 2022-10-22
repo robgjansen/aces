@@ -136,7 +136,7 @@ fn run_consumer<W: Write>(
                 }
             }
             None => {
-                // Block indefinately until we have input.
+                // Block indefinitely until we have input.
                 match receiver.recv() {
                     Ok(line) => line,
                     Err(_) => {
