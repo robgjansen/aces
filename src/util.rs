@@ -52,7 +52,7 @@ pub fn get_data_sink(path: &PathBuf) -> anyhow::Result<Box<dyn Write>> {
     }
 }
 
-pub fn gen_base_outpath(input: &PathBuf) -> PathBuf {
+fn gen_base_outpath(input: &PathBuf) -> PathBuf {
     if input.as_os_str().eq("-") {
         let current_ts = Utc::now().format("%Y-%m-%d_%H:%M:%S_UTC");
         PathBuf::from(format!("./data_stream_{}", current_ts))

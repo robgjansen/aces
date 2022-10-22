@@ -7,12 +7,12 @@ use zstd::stream::write::{Decoder, Encoder};
 
 mod args;
 mod crypto;
+mod tor;
 mod util;
 
 use crate::{
     args::{
-        Commands, DecryptArgs, EncryptArgs, EncryptFileArgs, EncryptInputs, EncryptTorArgs,
-        GenKeyArgs, LogLevel,
+        Commands, DecryptArgs, EncryptArgs, EncryptFileArgs, EncryptInputs, GenKeyArgs, LogLevel,
     },
     crypto::{AutoDecryptor, AutoEncryptor},
 };
@@ -90,7 +90,7 @@ fn run_encrypt(args: &EncryptArgs) -> anyhow::Result<()> {
         }
         EncryptInputs::Tor(tor_args) => {
             log::info!("Running encrypt tor subcommand");
-            run_encrypt_tor(args, tor_args)
+            tor::run_encrypt_tor(args, tor_args)
         }
     }
 }
@@ -128,12 +128,6 @@ fn run_encrypt_file(args: &EncryptArgs, file_args: &EncryptFileArgs) -> anyhow::
 
     log::info!("Success! Processed {} bytes from input stream.", num_copied);
     Ok(())
-}
-
-fn run_encrypt_tor(_args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow::Result<()> {
-    log::info!("{:?}", tor_args.event);
-    log::info!("{:?}", tor_args.rotate);
-    todo!()
 }
 
 fn run_decrypt(args: &DecryptArgs) -> anyhow::Result<()> {
