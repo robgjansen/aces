@@ -64,7 +64,7 @@ pub struct DecryptArgs {
     #[arg(short, long, value_name = "OUTPATH")]
     pub output: Option<PathBuf>,
     /// The path to an aces secret key file
-    #[arg(short, long, value_name = "KEYPATH")]
+    #[arg(value_name = "KEYPATH")]
     pub key: PathBuf,
     /// The path to the ciphertext file to decrypt, or '-' for stdin
     #[arg(value_name = "INPATH")]
