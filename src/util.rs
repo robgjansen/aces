@@ -1,7 +1,7 @@
 use std::{
     fs::File,
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::Context;
@@ -11,17 +11,17 @@ use crypto_box::{PublicKey, SecretKey};
 use crate::crypto;
 
 pub fn get_pub_key(key: &PathBuf) -> anyhow::Result<PublicKey> {
-    Ok(crypto::read_public_key(key).context(std::format!(
+    crypto::read_public_key(key).context(std::format!(
         "Failed to read public key {}",
         key.to_string_lossy()
-    ))?)
+    ))
 }
 
 pub fn get_sec_key(key: &PathBuf) -> anyhow::Result<SecretKey> {
-    Ok(crypto::read_secret_key(key).context(std::format!(
+    crypto::read_secret_key(key).context(std::format!(
         "Failed to read secret key {}",
         key.to_string_lossy()
-    ))?)
+    ))
 }
 
 pub fn get_data_source(path: &PathBuf) -> anyhow::Result<Box<dyn Read>> {
@@ -52,16 +52,16 @@ pub fn get_data_sink(path: &PathBuf) -> anyhow::Result<Box<dyn Write>> {
     }
 }
 
-fn gen_base_outpath(input: &PathBuf) -> PathBuf {
+fn gen_base_outpath(input: &Path) -> PathBuf {
     if input.as_os_str().eq("-") {
         let current_ts = Utc::now().format("%Y-%m-%d_%H:%M:%S_UTC");
         PathBuf::from(format!("./data_stream_{}", current_ts))
     } else {
-        input.clone()
+        input.to_path_buf()
     }
 }
 
-pub fn gen_encrypt_outpath(input: &PathBuf, compress: bool) -> anyhow::Result<PathBuf> {
+pub fn gen_encrypt_outpath(input: &Path, compress: bool) -> anyhow::Result<PathBuf> {
     let mut out = gen_base_outpath(input);
 
     if compress {
@@ -84,7 +84,7 @@ pub fn gen_encrypt_outpath(input: &PathBuf, compress: bool) -> anyhow::Result<Pa
     Ok(out)
 }
 
-pub fn gen_decrypt_outpath(input: &PathBuf, decompress: bool) -> anyhow::Result<PathBuf> {
+pub fn gen_decrypt_outpath(input: &Path, decompress: bool) -> anyhow::Result<PathBuf> {
     let mut out = gen_base_outpath(input);
 
     if let Some(ext) = out.extension() {

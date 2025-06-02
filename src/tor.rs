@@ -12,7 +12,6 @@ use std::{
 };
 
 use anyhow::Context;
-use ctrlc;
 use zstd::stream::write::Encoder;
 
 use crate::{
@@ -69,7 +68,7 @@ pub fn run_encrypt_tor(args: &EncryptArgs, tor_args: &EncryptTorArgs) -> anyhow:
 
     log::info!("Joining producer threads.");
     for handle in producers {
-        if let Err(_) = handle.join() {
+        if handle.join().is_err() {
             log::error!("Encountered error joining producer thread");
         }
     }
@@ -105,7 +104,7 @@ fn run_encrypt_chain(
         let mut encoder =
             Encoder::new(encryptor, 0).context("Failure initializing zstd encoder")?;
 
-        let num_copied = run_consumer(&receiver, &mut encoder, &stop_at, &got_sigint)
+        let num_copied = run_consumer(receiver, &mut encoder, &stop_at, got_sigint)
             .context("Failure running encoder-->encryptor chain")?;
 
         encryptor = encoder.finish().context("Failure finishing encoder")?;
@@ -113,7 +112,7 @@ fn run_encrypt_chain(
         num_copied
     } else {
         log::info!("Tor-->Encrypting data stream...");
-        run_consumer(&receiver, &mut encryptor, &stop_at, &got_sigint)
+        run_consumer(receiver, &mut encryptor, &stop_at, got_sigint)
             .context("Failure running encryptor")?
     };
 
@@ -250,14 +249,12 @@ fn run_producer(
             return Ok(());
         }
 
-        if line.starts_with("650 ") {
-            if let Err(_) = sender.send(line) {
-                log::info!(
-                    "Producer {:?} channel was disconnected.",
-                    thread::current().id()
-                );
-                return Ok(());
-            }
+        if line.starts_with("650 ") && sender.send(line).is_err() {
+            log::info!(
+                "Producer {:?} channel was disconnected.",
+                thread::current().id()
+            );
+            return Ok(());
         }
     }
 }

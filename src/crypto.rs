@@ -1,4 +1,3 @@
-use anyhow;
 use crypto_box::{
     aead::{Aead, AeadCore, OsRng, Payload},
     ChaChaBox, Nonce, PublicKey, SecretKey,
@@ -93,13 +92,13 @@ impl<W: Write> AutoEncryptor<W> {
         let nonce = ChaChaBox::generate_nonce(&mut OsRng);
 
         let payload = Payload {
-            msg: msg.as_ref(),
+            msg,
             aad: nonce.as_ref(),
         };
 
         let ciphertext = match self.crypto_box.encrypt(&nonce, payload) {
             Ok(vec) => vec,
-            Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
+            Err(e) => return Err(Error::other(e.to_string())),
         };
 
         self.writer.as_mut().unwrap().write_all(nonce.as_ref())?;
@@ -123,7 +122,7 @@ impl<W: Write> AutoEncryptor<W> {
             self.write_encrypted_message(msg.as_slice())?;
         }
 
-        if finalize && self.msg_buf2.len() > 0 {
+        if finalize && !self.msg_buf2.is_empty() {
             // Write remaining buf without requiring a full-length message.
             let remaining: Vec<u8> = self.msg_buf2.drain(..).collect();
             self.write_encrypted_message(remaining.as_slice())?;
@@ -188,7 +187,7 @@ impl<W: Write> AutoDecryptor<W> {
     fn write_decrypted_message(&mut self, msg: &[u8]) -> io::Result<()> {
         let crypto_box = match &self.crypto_box {
             Some(cb) => cb,
-            None => return Err(Error::new(ErrorKind::Other, "Crypto box does not exist!")),
+            None => return Err(Error::other("Crypto box does not exist!")),
         };
 
         let nonce = {
@@ -204,7 +203,7 @@ impl<W: Write> AutoDecryptor<W> {
 
         let plaintext = match crypto_box.decrypt(&nonce, payload) {
             Ok(vec) => vec,
-            Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
+            Err(e) => return Err(Error::other(e.to_string())),
         };
         self.writer
             .as_mut()
@@ -223,7 +222,7 @@ impl<W: Write> AutoDecryptor<W> {
             let peer_key = {
                 let key_bytes: Vec<u8> = self.msg_buf.drain(0..KEY_LEN).collect();
                 let mut key_buf: [u8; KEY_LEN] = [0; KEY_LEN];
-                key_buf.copy_from_slice(&key_bytes.as_slice());
+                key_buf.copy_from_slice(key_bytes.as_slice());
                 PublicKey::from(key_buf)
             };
 
@@ -279,14 +278,14 @@ mod tests {
 
     fn make_buffer(val: u8, len: usize) -> Cursor<Vec<u8>> {
         let mut buf: Vec<u8> = Vec::with_capacity(len);
-        buf.extend(std::iter::repeat(val).take(len));
+        buf.extend(std::iter::repeat_n(val, len));
         Cursor::new(buf)
     }
 
     fn run_pipeline(plaintext_len: usize) -> anyhow::Result<()> {
         // Once per file: 32 bytes for pub_key
         // Once per msg: 24 bytes for nonce, 16 for mac
-        let num_msgs = (plaintext_len + PLAINTEXT_MSG_LEN - 1) / PLAINTEXT_MSG_LEN;
+        let num_msgs = plaintext_len.div_ceil(PLAINTEXT_MSG_LEN);
         let ciphertext_len = KEY_LEN + ((NONCE_LEN + MAC_LEN) * num_msgs) + plaintext_len;
 
         let mut plaintext = make_buffer(OsRng.next_u32() as u8, plaintext_len);
@@ -298,9 +297,9 @@ mod tests {
         let mut aenc = AutoEncryptor::new(key.public_key(), encrypted);
 
         // writes the pub key
-        assert_eq!(aenc.wrote_header, false);
+        assert!(!aenc.wrote_header);
         aenc.write_inner(false).unwrap();
-        assert_eq!(aenc.wrote_header, true);
+        assert!(aenc.wrote_header);
 
         // plaintext completely read
         assert_eq!(
@@ -319,10 +318,10 @@ mod tests {
         let mut adec = AutoDecryptor::new(key, decrypted);
 
         // reads the pub key
-        assert_eq!(adec.read_header, false);
+        assert!(!adec.read_header);
         let mut partial = encrypted.take(KEY_LEN as u64);
         assert_eq!(io::copy(&mut partial, &mut adec).unwrap(), KEY_LEN as u64);
-        assert_eq!(adec.read_header, true);
+        assert!(adec.read_header);
         let mut encrypted = partial.into_inner();
         assert_eq!(encrypted.position(), KEY_LEN as u64);
 
