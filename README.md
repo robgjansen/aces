@@ -10,7 +10,11 @@ machine that is producing the data stream.
 
 `aces` is designed to be a useful utility in a network measurement pipeline.
 
-### Build
+## Easy install
+
+    cargo install --git https://github.com/robgjansen/aces
+
+## Build
 
 Debug build (also used for tests):
 
@@ -29,9 +33,9 @@ Run aces:
     cargo run -- -h
     ./target/{debug,release}/aces -h
 
-### Usage
+## Usage
 
-**Step 1: Generate a key-pair**
+### Step 1: Generate a key-pair
 
 You should generate a public+secret key-pair offline, so that the secret key is
 unavailable on the measurement machine (i.e., the machine producing the data
@@ -41,7 +45,7 @@ streams that you want to encrypt).
 
 Then copy `aces.pub.key` to the remote measurement machine.
 
-**Step 2: Encrypt data**
+### Step 2: Encrypt data
 
 Use `aces` on a remote measurement machine to encrypt data.
 
@@ -69,7 +73,7 @@ Same, rotating the output file every day:
 
     aces encrypt aces.pub.key tor --event BW --event CIRC --rotate "1 day" path/to/control.sock 
 
-**Step 3: Decrypt data**
+### Step 3: Decrypt data
 
 Decrypt with the secret key, after copying the encrypted output files from the
 measurement remote to your local machine.
